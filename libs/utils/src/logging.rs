@@ -4,6 +4,38 @@ use std::{
 };
 
 use anyhow::{Context, Result};
+use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
+
+macro_rules! init_tracing {
+    ($subscriber:expr) => {
+        let otel_service_name = std::env::var("OTEL_SERVICE_NAME")
+            .ok()
+            .filter(|v| !v.trim().is_empty());
+        let jaeger_endpoint = std::env::var("OTEL_EXPORTER_JAEGER_ENDPOINT")
+            .ok()
+            .filter(|v| !v.trim().is_empty());
+
+        if otel_service_name.is_some() || jaeger_endpoint.is_some() {
+            let pipeline_builder = opentelemetry_jaeger::new_pipeline().with_trace_config(
+                opentelemetry::sdk::trace::Config::default().with_resource(
+                    opentelemetry::sdk::Resource::new(vec![opentelemetry::KeyValue::new(
+                        "hostname",
+                        std::env::var("HOSTNAME")
+                            .ok()
+                            .unwrap_or_else(|| "unknown".to_string()),
+                    )]),
+                ),
+            );
+            let tracer = pipeline_builder.install_simple()?;
+
+            let subscriber =
+                $subscriber.with(tracing_opentelemetry::OpenTelemetryLayer::new(tracer));
+            tracing::dispatcher::Dispatch::new(subscriber).try_init()?;
+        } else {
+            tracing::dispatcher::Dispatch::new($subscriber).try_init()?;
+        }
+    };
+}
 
 pub fn init(log_filename: impl AsRef<Path>, daemonize: bool) -> Result<File> {
     // Don't open the same file for output multiple times;
@@ -31,12 +63,14 @@ pub fn init(log_filename: impl AsRef<Path>, daemonize: bool) -> Result<File> {
     // for example to be in line with docker log command which expects logs comimg from stdout
     if daemonize {
         let x = log_file.try_clone().unwrap();
-        base_logger
+        let subscriber = base_logger
             .with_writer(move || x.try_clone().unwrap())
-            .init();
+            .finish();
+        init_tracing!(subscriber);
     } else {
-        base_logger.init();
-    }
+        let subscriber = base_logger.finish();
+        init_tracing!(subscriber);
+    };
 
     Ok(log_file)
 }
