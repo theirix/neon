@@ -3,7 +3,7 @@ import statistics
 import threading
 import time
 import timeit
-from random import randint
+from random import randint, randrange
 
 import pytest
 from batch_others.test_backpressure import pg_cur
@@ -14,48 +14,62 @@ from fixtures.neon_fixtures import Postgres
 
 from performance.test_perf_pgbench import get_scales_matrix
 
+# Number of tables to use in test_measure_read_latency_heavy_write_workload.
+n_tables = 100
 
-def start_heavy_write_workload(pg: Postgres, scale: int = 1, n_iters: int = 10):
+# Array containing the # of rows, for each table in range 0..n_tables
+n_rows = []
+
+# Number of threads to use
+n_threads = 10
+
+def start_heavy_write_workload(pg: Postgres, scale: int = 1, n_iters: int = 100):
     """Start an intensive write workload which first initializes a table `t` with `new_rows_each_update` rows.
     At each subsequent step, we update a subset of rows in the table and insert new `new_rows_each_update` rows.
     The variable `new_rows_each_update` is equal to `scale * 100_000`."""
+    global n_rows
+    global n_tables
+
     new_rows_each_update = scale * 100_000
 
-    with pg_cur(pg) as cur:
-        cur.execute(
-            f"INSERT INTO t SELECT s, s % 10, 0 FROM generate_series(1,{new_rows_each_update}) s")
-    n_rows = new_rows_each_update
-
     for _ in range(n_iters):
-        # the subset of rows updated in this step is determined by the `tag` column
-        tag = randint(0, 10)
+        table = randrange(n_tables)
         with pg_cur(pg) as cur:
-            cur.execute(f"UPDATE t SET cnt=cnt+1 WHERE tag={tag}")
             cur.execute(
-                f"INSERT INTO t SELECT s+{n_rows}, s % 10, 0 FROM generate_series(1,{new_rows_each_update}) s"
+                f"INSERT INTO t{table} (cnt) SELECT 0 FROM generate_series(1,{new_rows_each_update}) s"
             )
-        n_rows += new_rows_each_update
+        n_rows[table] += new_rows_each_update
 
 
 @pytest.mark.parametrize("scale", get_scales_matrix(1))
 def test_measure_read_latency_heavy_write_workload(neon_with_baseline: PgCompare, scale: int):
+    global n_tables
+
     env = neon_with_baseline
     pg = env.pg
 
+    # Initialize the test tables
     with pg_cur(pg) as cur:
-        cur.execute("CREATE TABLE t(key int primary key, tag int, cnt int)")
+        for table in range(n_tables):
+            cur.execute(f"CREATE TABLE t{table}(key serial primary key, cnt int, filler text default 'foooooooooooooooooooooooooooooooooooooooooooooooooooo')")
+            cur.execute(f"INSERT INTO t{table} (cnt) values (0)")
+            n_rows.append(1)
 
-    write_thread = threading.Thread(target=start_heavy_write_workload, args=(pg, ))
-    write_thread.start()
+    for _ in range(n_threads):
+        write_thread = threading.Thread(target=start_heavy_write_workload, args=(pg, ))
+        write_thread.start()
 
-    record_read_latency(env, write_thread, "SELECT count(*) from t")
+    record_read_latency(env, write_thread, get_query)
 
+def get_query():
+    global n_rows
+    tab = randrange(n_tables)
+    n = n_rows[tab]
+    key = randint(1, n)
+    return f"SELECT * FROM t{tab} WHERE key = {key}"
 
 def start_pgbench_simple_update_workload(env: PgCompare, scale: int, transactions: int):
-    env.pg_bin.run_capture(['pgbench', f'-s{scale}', '-i', '-Igvp', env.pg.connstr()])
-    env.flush()
-
-    env.pg_bin.run_capture(['pgbench', '-N', f'-t{transactions}', '-Mprepared', env.pg.connstr()])
+    env.pg_bin.run_capture(['pgbench', '-j10', '-c10', '-N', '-T120', '-Mprepared', env.pg.connstr(options="-csynchronous_commit=off")])
     env.flush()
 
 
@@ -74,13 +88,18 @@ def test_measure_read_latency_pgbench_simple_update_workload(neon_with_baseline:
     # create pgbench tables
     env.pg_bin.run_capture(['pgbench', f'-s{scale}', '-i', '-Idt', env.pg.connstr()])
     env.flush()
+    env.pg_bin.run_capture(['pgbench', f'-s{scale}', '-i', '-Igvp', env.pg.connstr()])
+    env.flush()
 
     write_thread = threading.Thread(target=start_pgbench_simple_update_workload,
                                     args=(env, scale, transactions))
     write_thread.start()
 
-    record_read_latency(env, write_thread, "SELECT sum(abalance) from pgbench_accounts")
+    record_read_latency(env, write_thread, get_pgbench_query)
 
+def get_pgbench_query():
+    aid = randint(1, 1000000)
+    return f"SELECT * FROM pgbench_accounts WHERE aid = {aid}"
 
 def start_pgbench_intensive_initialization(env: PgCompare, scale: int):
     env.pg_bin.run_capture(['pgbench', f'-s{scale}', '-i', env.pg.connstr()])
@@ -101,10 +120,11 @@ def test_measure_read_latency_other_table(neon_with_baseline: PgCompare, scale: 
                                     args=(env, scale))
     write_thread.start()
 
-    record_read_latency(env, write_thread, "SELECT count(*) from foo")
+    record_read_latency(env, write_thread,
+                        lambda: "SELECT count(*) from foo")
 
 
-def record_read_latency(env: PgCompare, write_thread: threading.Thread, read_query: str):
+def record_read_latency(env: PgCompare, write_thread: threading.Thread, read_query_func):
     with env.record_duration("run_duration"):
         read_latencies = []
         while write_thread.is_alive():
@@ -112,6 +132,7 @@ def record_read_latency(env: PgCompare, write_thread: threading.Thread, read_que
 
             with pg_cur(env.pg) as cur:
                 t = timeit.default_timer()
+                read_query = read_query_func()
                 cur.execute(read_query)
                 duration = timeit.default_timer() - t
 
