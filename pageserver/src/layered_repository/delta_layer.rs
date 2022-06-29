@@ -47,6 +47,7 @@ use std::os::unix::fs::FileExt;
 use std::path::{Path, PathBuf};
 use std::sync::{RwLock, RwLockReadGuard, RwLockWriteGuard};
 use tracing::*;
+use postgres_ffi::pg_constants::BLCKSZ;
 
 use utils::{
     bin_ser::BeSer,
@@ -614,6 +615,32 @@ pub struct DeltaLayerWriter {
 }
 
 impl DeltaLayerWriter {
+    pub(crate) fn new_on_path(
+        conf: &'static PageServerConf,
+        path: PathBuf,
+        timelineid: ZTimelineId,
+        tenantid: ZTenantId,
+    ) -> Result<DeltaLayerWriter> {
+        let block_buf = BlockBuf::new();
+        let tree_builder = DiskBtreeBuilder::new(block_buf);
+
+        Ok(DeltaLayerWriter {
+            conf,
+            path: path.clone(),
+            timelineid,
+            tenantid,
+            key_start: Key::MIN,
+            lsn_range: Lsn(0)..Lsn::MAX,
+            tree: tree_builder,
+            blob_writer: WriteBlobWriter::new(
+                BufWriter::new(
+                    VirtualFile::open(&path.clone())?
+                ),
+                BLCKSZ as u64,
+            ),
+        })
+    }
+        
     ///
     /// Start building a new delta layer.
     ///
@@ -819,6 +846,297 @@ impl<'a> DeltaValueIter<'a> {
             Ok(Some((key, lsn, val)))
         } else {
             Ok(None)
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::fmt::Debug;
+    use std::fs;
+    use std::fs::File;
+    use std::io::Read;
+    use std::iter::empty;
+    use std::path::{Path, PathBuf};
+    use bytes::Bytes;
+    use const_format::str_repeat;
+    use itertools::{chain, zip_eq};
+    use thiserror::private::PathAsDisplay;
+    use utils::bin_ser::BeSer;
+    use utils::lsn::Lsn;
+    use utils::zid::{ZTenantId, ZTimelineId};
+    use crate::config::PageServerConf;
+    use crate::layered_repository::delta_layer::{DeltaLayer, DeltaLayerWriter};
+    use crate::repository::{Key, Value};
+    use crate::walrecord::ZenithWalRecord;
+    use crate::walrecord::test_utils::*;
+
+    use rand::rngs::StdRng;
+    use rand::{Rng, RngCore, SeedableRng};
+    use tokio::io::AsyncReadExt;
+    use postgres_ffi::pg_constants::SLRU_PAGES_PER_SEGMENT;
+
+    fn get_base_path(version: &str) -> PathBuf {
+        let mut path = PathBuf::new();
+        path.push("test");
+        path.push("data");
+        path.push("serialized");
+        path.push("delta_layer");
+        path.push(version);
+        
+        if !path.exists() {
+            fs::create_dir_all(path.as_path()).unwrap(); // failure is accepted
+            let mut new_recordset_path = path.clone();
+            new_recordset_path.push("records");
+            
+            let records = generate_wal_data().collect::<Vec<_>>();
+            
+            <Vec<_> as BeSer>::ser_into(
+                &records,
+                &mut File::open(new_recordset_path.as_path()).unwrap()
+            ).unwrap()
+        }
+        return path;
+    }
+
+    fn generate_wal_data() -> Box<dyn Iterator<Item = ((Key, Lsn), Value)>> {
+        let mut rng = <StdRng as SeedableRng>::seed_from_u64(0);
+
+        // Around the first LSN of a newly initialized cluster.
+        let mut base_lsn: u64 = 0x20_000;
+
+        let pg_seed = rng.gen();
+        let clvmf_seed = rng.gen();
+        let clsc_seed = rng.gen();
+        let clsa_seed = rng.gen();
+        let mxoc_seed = rng.gen();
+        let mxmc_seed = rng.gen();
+
+        let pg_record_iter = (0..rng.gen_range(0x4..0x100usize))
+            .into_iter()
+            .flat_map(move |i| {
+                let mut current_lsn = base_lsn;
+                let mut my_rng = StdRng::seed_from_u64(pg_seed);
+                let n_records = my_rng.gen_range(1..255);
+                
+                let (blckno, records) = gen_random_pg_records(n_records, &mut my_rng);
+
+                let key = Key {
+                    field1: 0,
+                    field2: 0,
+                    field3: 0,
+                    field4: 0,
+                    field5: 0,
+                    field6: blckno,
+                };
+
+                records.into_iter()
+                    .map(move |rec| {
+                        current_lsn += my_rng.gen_range(0..u32::MAX as u64);
+                        ((key.clone(), Lsn(current_lsn)), Value::WalRecord(rec))
+                    })
+            });
+
+        let clvmf_record_iter = (0..rng.gen_range(0x4..0x100usize))
+            .into_iter()
+            .flat_map(move |i| {
+                let mut current_lsn = base_lsn;
+                let mut my_rng = StdRng::seed_from_u64(clvmf_seed);
+                let n_records = my_rng.gen_range(1..255);
+
+                let (blckno, records) = gen_random_clvmf_records(n_records, &mut my_rng);
+
+                let key = Key {
+                    field1: 0,
+                    field2: 0,
+                    field3: 0,
+                    field4: 0,
+                    field5: 1,
+                    field6: blckno,
+                };
+                
+                records.into_iter()
+                    .map(move |rec| {
+                        current_lsn += my_rng.gen_range(0..u32::MAX as u64);
+                        ((key.clone(), Lsn(current_lsn)), Value::WalRecord(rec))
+                    })
+            });
+
+        let clsc_record_iter = (0..rng.gen_range(0x4..0x100usize))
+            .into_iter()
+            .flat_map(move |i| {
+                let mut current_lsn = base_lsn;
+                let mut my_rng = StdRng::seed_from_u64(clsc_seed);
+                let n_records = my_rng.gen_range(1..255);
+
+                let (blckno, records) = gen_random_clsc_records(n_records, &mut my_rng);
+
+                let key = Key {
+                    field1: 1,
+                    field2: 0,
+                    field3: 1,
+                    field4: blckno / SLRU_PAGES_PER_SEGMENT,
+                    field5: 0,
+                    field6: blckno % SLRU_PAGES_PER_SEGMENT,
+                };
+
+                records.into_iter()
+                    .map(move |rec| {
+                        current_lsn += my_rng.gen_range(0..u32::MAX as u64);
+                        ((key.clone(), Lsn(current_lsn)), Value::WalRecord(rec))
+                    })
+            });
+
+        let clsa_record_iter = (0..rng.gen_range(0x4..0x100usize))
+            .into_iter()
+            .flat_map(move |i| {
+                let mut current_lsn = base_lsn;
+                let mut my_rng = StdRng::seed_from_u64(clsa_seed);
+                let n_records = my_rng.gen_range(1..255);
+
+                let (blckno, records) = gen_random_clsa_records(n_records, &mut my_rng);
+
+                let key = Key {
+                    field1: 1,
+                    field2: 0,
+                    field3: 1,
+                    field4: blckno / SLRU_PAGES_PER_SEGMENT,
+                    field5: 0,
+                    field6: blckno % SLRU_PAGES_PER_SEGMENT,
+                };
+
+                records.into_iter()
+                    .map(move |rec| {
+                        current_lsn += my_rng.gen_range(0..u32::MAX as u64);
+                        ((key.clone(), Lsn(current_lsn)), Value::WalRecord(rec))
+                    })
+            });
+
+        let mxoc_record_iter = (0..rng.gen_range(0x4..0x100usize))
+            .into_iter()
+            .flat_map(move |i| {
+                let mut current_lsn = base_lsn;
+                let mut my_rng = StdRng::seed_from_u64(mxoc_seed);
+                let n_records = my_rng.gen_range(1..255);
+
+                let (blckno, records) = gen_random_mxoc_records(n_records, &mut my_rng);
+
+                let key = Key {
+                    field1: 1,
+                    field2: 2,
+                    field3: 1,
+                    field4: blckno / SLRU_PAGES_PER_SEGMENT,
+                    field5: 0,
+                    field6: blckno % SLRU_PAGES_PER_SEGMENT,
+                };
+
+                records.into_iter()
+                    .map(move |rec| {
+                        current_lsn += my_rng.gen_range(0..u32::MAX as u64);
+                        ((key.clone(), Lsn(current_lsn)), Value::WalRecord(rec))
+                    })
+            });
+
+        let mxmc_record_iter = (0..rng.gen_range(0x4..0x100usize))
+            .into_iter()
+            .flat_map(move |i| {
+                let mut current_lsn = base_lsn;
+                let mut my_rng = StdRng::seed_from_u64(mxmc_seed);
+                let n_records = my_rng.gen_range(1..255);
+
+                let (blckno, records) = gen_random_mxmc_records(n_records, &mut my_rng);
+
+                let key = Key {
+                    field1: 1,
+                    field2: 1,
+                    field3: 1,
+                    field4: blckno / SLRU_PAGES_PER_SEGMENT,
+                    field5: 0,
+                    field6: blckno % SLRU_PAGES_PER_SEGMENT,
+                };
+
+                records.into_iter()
+                    .map(move |rec| {
+                        current_lsn += my_rng.gen_range(0..u32::MAX as u64);
+                        ((key.clone(), Lsn(current_lsn)), Value::WalRecord(rec))
+                    })
+            });
+        
+        Box::new(chain!(
+            pg_record_iter,
+            clvmf_record_iter,
+            clsc_record_iter,
+            clsa_record_iter,
+            mxoc_record_iter,
+            mxmc_record_iter,
+        ))
+    }
+
+    fn get_recordset(mut base_dir: PathBuf) -> Box<dyn Iterator<Item=((Key, Lsn), Value)>> {
+        let mut file_path = base_dir.clone();
+        file_path.push("records");
+        assert!(file_path.exists());
+
+        let mut file = File::open(file_path.as_path()).unwrap();
+
+        let res: Vec<((Key, Lsn), Value)> = <Vec<_> as BeSer>::des_from(&mut file).unwrap();
+
+        Box::new(res.into_iter())
+    }
+
+    #[test]
+    fn test_current_serialization_is_uptodate() {
+        let data = all_record_types();
+        
+        let basedir = get_base_path("latest");
+
+        let recordset = get_recordset(basedir.clone());
+        
+        let original = generate_wal_data();
+
+        for (left, right) in zip_eq(recordset, original) {
+            assert_eq!(left, right, "serialized recordset is not up to date");
+        }
+
+        let mut tmp_file_loc = std::env::temp_dir();
+        tmp_file_loc.push("delta_layer.tmp");
+        
+        let psconf = Box::leak::<'static>(Box::new(
+            PageServerConf::dummy_conf(tmp_file_loc.clone())
+        ));
+
+        let mut records = basedir.clone();
+        records.push("records");
+
+
+        let dlw = DeltaLayerWriter::new_on_path(
+            psconf,
+            tmp_file_loc,
+            ZTimelineId::from([0u8; 16]),
+            ZTenantId::from([0u8; 16]),
+        );
+
+        if !records.exists() {
+            let mut file = File::create(records.as_path()).unwrap();
+
+            let tmp_file = File::create(Path::new("latest")).unwrap();
+        }
+        let res = <Vec<ZenithWalRecord> as BeSer>::ser(&data)
+            .ok()
+            .unwrap();
+
+        let latest_version = "v1";
+
+        // assert_eq!(latest_serialized, &res[..]);
+    }
+
+    macro_rules! test_format_version {
+        ($record_set:ident, $layer_name:ident) => {
+            #[test]
+            fn can_deser_$record_set$_for_$layer_name() {
+                let source_dir = stringify!($record_set);
+                let layer_file = stringify!($layer_name);
+            }
         }
     }
 }

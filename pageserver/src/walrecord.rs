@@ -832,3 +832,510 @@ fn describe_postgres_wal_record(record: &Bytes) -> Result<String, DeserializeErr
 
     Ok(String::from(result))
 }
+
+#[cfg(test)]
+pub mod test_utils {
+    use std::{fs, iter};
+    use std::fs::File;
+    use std::io::{Cursor, Read};
+    use std::mem::size_of;
+    use std::path::PathBuf;
+    use bytes::{Buf, Bytes};
+    use const_format::str_repeat;
+    use rand::Rng;
+    use thiserror::private::PathAsDisplay;
+    use tokio::io::AsyncReadExt;
+    use tracing::Instrument;
+    use postgres_ffi::pg_constants::{BITS_PER_HEAPBLOCK, BLCKSZ, CLOG_XACTS_PER_PAGE, HEAPBLK_TO_MAPBLOCK, HEAPBLOCKS_PER_PAGE, MULTIXACT_MEMBERS_PER_PAGE, MULTIXACT_OFFSETS_PER_PAGE, SIZE_OF_PAGE_HEADER, VISIBILITYMAP_VALID_BITS};
+    use utils::bin_ser::BeSer;
+    use crate::pgdatadir_mapping::BlockNumber;
+    use crate::walrecord::MultiXactMember;
+    use super::ZenithWalRecord;
+
+    const HELPER_BYTES_SHORT: &'static [u8] = str_repeat!("\0", 24).as_bytes();
+    const HELPER_BYTES: &'static [u8] = str_repeat!("\0", 1024).as_bytes();
+    const HELPER_BYTES_LONG: &'static [u8] = str_repeat!("\0", (1024 * 1024)).as_bytes();
+
+
+    /* ZenithWalRecord::Postgres */
+    pub fn various_pg_records() -> Vec<ZenithWalRecord> {
+        vec![
+            ZenithWalRecord::Postgres {
+                will_init: false,
+                rec: Default::default()
+            },
+            ZenithWalRecord::Postgres {
+                will_init: true,
+                rec: Default::default()
+            },
+            ZenithWalRecord::Postgres {
+                will_init: false,
+                rec: Bytes::from_static(HELPER_BYTES_SHORT)
+            },
+            ZenithWalRecord::Postgres {
+                will_init: true,
+                rec: Bytes::from_static(HELPER_BYTES_SHORT)
+            },
+            ZenithWalRecord::Postgres {
+                will_init: false,
+                rec: Bytes::from_static(HELPER_BYTES)
+            },
+            ZenithWalRecord::Postgres {
+                will_init: true,
+                rec: Bytes::from_static(HELPER_BYTES)
+            },
+            ZenithWalRecord::Postgres {
+                will_init: false,
+                rec: Bytes::from_static(HELPER_BYTES_LONG)
+            },
+            ZenithWalRecord::Postgres {
+                will_init: true,
+                rec: Bytes::from_static(HELPER_BYTES_LONG)
+            },
+        ]
+    }
+
+    pub fn gen_random_pg_records<T: Rng>(count: usize, random: &mut T) -> (BlockNumber, Vec<ZenithWalRecord>) {
+        let mut ret = Vec::with_capacity(count);
+        let blocknumber = random.gen::<BlockNumber>();
+
+        for _ in 0..count {
+            ret.push(ZenithWalRecord::Postgres {
+                will_init: random.gen_range(0..2) == 0,
+                rec: Bytes::from_static(
+                    &HELPER_BYTES_LONG[24..(24usize << ((random.gen_range(0..16)) as u32))]
+                )
+            })
+        }
+
+        (blocknumber, ret)
+    }
+
+    /* ZenithWalRecord::ClearVisibilityMapFlags */
+    pub fn various_clvmf_records() -> Vec<ZenithWalRecord> {
+        vec![
+            ZenithWalRecord::ClearVisibilityMapFlags {
+                new_heap_blkno: None, /* invalid? */
+                old_heap_blkno: None,
+                flags: 0
+            },
+            ZenithWalRecord::ClearVisibilityMapFlags {
+                new_heap_blkno: Some(1),
+                old_heap_blkno: None,
+                flags: 0
+            },
+            ZenithWalRecord::ClearVisibilityMapFlags {
+                new_heap_blkno: None,
+                old_heap_blkno: Some(1), /* invalid? */
+                flags: 0
+            },
+            ZenithWalRecord::ClearVisibilityMapFlags {
+                new_heap_blkno: Some(1),
+                old_heap_blkno: Some(1),
+                flags: 0
+            },
+            ZenithWalRecord::ClearVisibilityMapFlags {
+                new_heap_blkno: None, /* invalid? */
+                old_heap_blkno: None,
+                flags: 0
+            },
+            ZenithWalRecord::ClearVisibilityMapFlags {
+                new_heap_blkno: Some(u32::MAX - 1),
+                old_heap_blkno: None,
+                flags: 0
+            },
+            ZenithWalRecord::ClearVisibilityMapFlags {
+                new_heap_blkno: None,
+                old_heap_blkno: Some(u32::MAX - 1), /* invalid? */
+                flags: 0
+            },
+            ZenithWalRecord::ClearVisibilityMapFlags {
+                new_heap_blkno: Some(u32::MAX - 1),
+                old_heap_blkno: Some(u32::MAX - 1),
+                flags: 0
+            },
+            ZenithWalRecord::ClearVisibilityMapFlags {
+                new_heap_blkno: Some(0),
+                old_heap_blkno: Some(u32::MAX - 1),
+                flags: 0
+            },
+            ZenithWalRecord::ClearVisibilityMapFlags {
+                new_heap_blkno: Some(u32::MAX - 1),
+                old_heap_blkno: Some(0),
+                flags: 0
+            },
+        ]
+    }
+
+    pub fn gen_random_clvmf_records<T: Rng>(count: usize, random: &mut T) ->  (BlockNumber, Vec<ZenithWalRecord>) {
+        let mut ret = Vec::with_capacity(count);
+        
+        let base_heapblckno = random.gen::<BlockNumber>();
+        let base_blockno = base_heapblckno / HEAPBLOCKS_PER_PAGE;
+        let base_heapblckno = base_heapblckno - (base_heapblckno % HEAPBLOCKS_PER_PAGE);
+
+        for _ in 0..count {
+            let record = match random.gen_range(0..3) {
+                0usize => ZenithWalRecord::ClearVisibilityMapFlags {
+                    new_heap_blkno: Some(base_heapblckno + random.gen_range(0..HEAPBLOCKS_PER_PAGE)),
+                    old_heap_blkno: Some(base_heapblckno + random.gen_range(0..HEAPBLOCKS_PER_PAGE)),
+                    flags: random.gen_range(0..VISIBILITYMAP_VALID_BITS)
+                },
+                1 => ZenithWalRecord::ClearVisibilityMapFlags {
+                    new_heap_blkno: Some(base_heapblckno + random.gen_range(0..HEAPBLOCKS_PER_PAGE)),
+                    old_heap_blkno: None,
+                    flags: 0
+                },
+                2 => ZenithWalRecord::ClearVisibilityMapFlags {
+                    new_heap_blkno: None,
+                    old_heap_blkno: Some(base_heapblckno + random.gen_range(0..HEAPBLOCKS_PER_PAGE)),
+                    flags: 0
+                },
+                _ => unreachable!(),
+            };
+
+            ret.push(record);
+        }
+
+        (HEAPBLK_TO_MAPBLOCK(base_heapblckno), ret)
+    }
+
+    /* ZenithWalRecord::ClogSetCommitted */
+    pub fn various_clsc_records() -> Vec<ZenithWalRecord> {
+        vec![
+            ZenithWalRecord::ClogSetCommitted {
+                xids: vec![1],
+                timestamp: i64::MIN,
+            },
+            ZenithWalRecord::ClogSetCommitted {
+                xids: vec![2],
+                timestamp: 0,
+            },
+            ZenithWalRecord::ClogSetCommitted {
+                xids: vec![3,4,5],
+                timestamp: 1,
+            },
+            ZenithWalRecord::ClogSetCommitted {
+                xids: vec![(BLCKSZ * 4 - 1).into()],
+                timestamp: 2,
+            },
+            ZenithWalRecord::ClogSetCommitted {
+                xids: vec![2, (BLCKSZ * 4 - 1).into()],
+                timestamp: 3,
+            },
+            ZenithWalRecord::ClogSetCommitted {
+                xids: vec![2, (BLCKSZ * 4 - 1).into()],
+                timestamp: i64::MAX,
+            },
+        ]
+    }
+
+    pub fn gen_random_clsc_records<T: Rng>(n_recs: usize, random: &mut T) -> (BlockNumber, Vec<ZenithWalRecord>) {
+        let mut ret = Vec::with_capacity(n_recs);
+
+        let base_xactno = random.gen::<BlockNumber>();
+        let base_blockno = base_xactno / CLOG_XACTS_PER_PAGE;
+        // round down to the first xact on that page.
+        let base_xactno = base_xactno - (base_xactno % CLOG_XACTS_PER_PAGE);
+
+        for _ in 0..n_recs {
+            let n_xids = random.gen_range(1..=255);
+            let mut xids = Vec::with_capacity(n_xids);
+            
+            for _ in 0..n_xids {
+                xids.push( base_xactno + random.gen_range(0..CLOG_XACTS_PER_PAGE));
+            }
+            
+            xids.sort();
+
+            let mut prev = 0;
+            for x in xids.iter_mut() {
+                if *x <= prev {
+                    if prev != u32::MAX {
+                        *x = prev + 1;
+                    }
+                    else {
+                        *x = u32::MAX;
+                    }
+                }
+                prev = *x;
+            }
+
+            for x in xids.iter_mut().rev() {
+                if *x >= prev {
+                    if prev != 1 {
+                        *x = prev - 1;
+                    }
+                    else {
+                        *x = 0;
+                    }
+                }
+                prev = *x;
+            }
+
+            ret.push(ZenithWalRecord::ClogSetCommitted {
+                xids,
+                timestamp: random.gen(),
+            });
+        }
+
+        (base_blockno, ret)
+    }
+
+    /* ZenithWalRecord::ClogSetAborted */
+    pub fn various_clsa_records() -> Vec<ZenithWalRecord> {
+        vec![
+            ZenithWalRecord::ClogSetAborted {
+                xids: vec![2],
+            },
+            ZenithWalRecord::ClogSetAborted {
+                xids: vec![3],
+            },
+            ZenithWalRecord::ClogSetAborted {
+                xids: vec![4,5,6],
+            },
+            ZenithWalRecord::ClogSetAborted {
+                xids: vec![(BLCKSZ * 4 - 1).into()],
+            },
+            ZenithWalRecord::ClogSetAborted {
+                xids: vec![2, (BLCKSZ * 4 - 1).into()],
+            },
+            ZenithWalRecord::ClogSetAborted {
+                xids: vec![0, (BLCKSZ * 4 - 1).into()],
+            },
+        ]
+    }
+
+    pub fn gen_random_clsa_records<T: Rng>(n_recs: usize, random: &mut T) -> (BlockNumber, Vec<ZenithWalRecord>) {
+        let mut ret = Vec::with_capacity(n_recs);
+
+        let base_xactno = random.gen::<BlockNumber>();
+        let base_blockno = base_xactno / CLOG_XACTS_PER_PAGE;
+        // round down to the first xact on that page.
+        let base_xactno = base_xactno - (base_xactno % CLOG_XACTS_PER_PAGE);
+
+        for _ in 0..n_recs {
+            let n_xids = random.gen::<u8>() as usize;
+            let mut xids: Vec<u32> = Vec::with_capacity(n_xids);
+
+            for _ in 0..n_xids {
+                xids.push( base_xactno + random.gen_range(0..CLOG_XACTS_PER_PAGE));
+            }
+
+            xids.sort();
+            
+            let mut prev = 0;
+            for x in xids.iter_mut() {
+                if *x <= prev {
+                    if prev != u32::MAX {
+                        *x = prev + 1;
+                    }
+                    else {
+                        *x = u32::MAX;
+                    }
+                }
+                prev = *x;
+            }
+
+            for x in xids.iter_mut().rev() {
+                if *x >= prev {
+                    if prev != 1 {
+                        *x = prev - 1;
+                    }
+                    else {
+                        *x = 0;
+                    }
+                }
+                prev = *x;
+            }
+
+            ret.push(ZenithWalRecord::ClogSetAborted {
+                xids,
+            });
+        }
+
+        (base_blockno, ret)
+    }
+
+    /* ZenithWalRecord::MultixactOffsetCreate */
+    pub fn various_mxoc_records() -> Vec<ZenithWalRecord> {
+        vec![
+            ZenithWalRecord::MultixactOffsetCreate {
+                mid: 1,
+                moff: 0,
+            },
+            ZenithWalRecord::MultixactOffsetCreate {
+                mid: 1,
+                moff: u32::MAX,
+            },
+            ZenithWalRecord::MultixactOffsetCreate {
+                mid: u32::MAX,
+                moff: 0,
+            },
+            ZenithWalRecord::MultixactOffsetCreate {
+                mid: u32::MAX,
+                moff: u32::MAX,
+            },
+        ]
+    }
+
+    pub fn gen_random_mxoc_records<T: Rng>(n_recs: usize, random: &mut T) -> (BlockNumber, Vec<ZenithWalRecord>) {
+        let mut ret = Vec::with_capacity(n_recs);
+
+        let base_xactno = random.gen::<u32>();
+        let base_blockno: BlockNumber = base_xactno / MULTIXACT_OFFSETS_PER_PAGE as u32;
+        // round down to the first xact on that page.
+        let base_xactno = base_xactno - (base_xactno % MULTIXACT_OFFSETS_PER_PAGE as u32);
+
+        for _ in 0..n_recs {
+            ret.push(ZenithWalRecord::MultixactOffsetCreate {
+                mid: base_blockno + random.gen_range(0..(MULTIXACT_OFFSETS_PER_PAGE as u32)),
+                moff: random.gen()
+            })
+        }
+
+        (base_blockno, ret)
+    }
+
+    /* ::MultixactMembersCreate */
+    pub fn various_mxmc_records() -> Vec<ZenithWalRecord> {
+        vec![
+            ZenithWalRecord::MultixactMembersCreate {
+                moff: 0,
+                members: vec![
+                    MultiXactMember {
+                        xid: 2,
+                        status: 0x00, /* MultiXactStatusForKeyShare */
+                    }
+                ]
+            },
+            ZenithWalRecord::MultixactMembersCreate {
+                moff: 0x10,
+                members: vec![
+                    MultiXactMember {
+                        xid: (MULTIXACT_MEMBERS_PER_PAGE - 1).into(),
+                        status: 0x00, /* MultiXactStatusForKeyShare */
+                    }
+                ]
+            },
+            ZenithWalRecord::MultixactMembersCreate {
+                moff: 0x20,
+                members: vec![
+                    MultiXactMember {
+                        xid: 1,
+                        status: 0x00, /* MultiXactStatusForKeyShare */
+                    },
+                    MultiXactMember {
+                        xid: 2,
+                        status: 0x01, /* MultiXactStatusForShare */
+                    },
+                    MultiXactMember {
+                        xid: 3,
+                        status: 0x02, /* MultiXactStatusForNoKeyUpdate */
+                    },
+                    MultiXactMember {
+                        xid: 4,
+                        status: 0x03, /* MultiXactStatusForUpdate */
+                    },
+                    MultiXactMember {
+                        xid: 5,
+                        status: 0x04, /* MultiXactStatusNoKeyUpdate */
+                    },
+                    MultiXactMember {
+                        xid: 6,
+                        status: 0x05, /* MultiXactStatusUpdate */
+                    },
+                ]
+            },
+            ZenithWalRecord::MultixactMembersCreate {
+                moff: u32::MAX,
+                members: vec![
+                    MultiXactMember {
+                        xid: u32::MAX,
+                        status: 0x05, /* MultiXactStatusUpdate */
+                    }
+                ]
+            },
+        ]
+    }
+
+    pub fn gen_random_mxmc_records<T: Rng>(n_recs: usize, random: &mut T) -> (BlockNumber, Vec<ZenithWalRecord>) {
+        let mut ret = Vec::with_capacity(n_recs);
+
+        let base_xactno = random.gen::<u32>();
+        let base_blockno: BlockNumber = base_xactno / MULTIXACT_OFFSETS_PER_PAGE as u32;
+        // round down to the first xact on that page.
+        let base_xactno = base_xactno - (base_xactno % MULTIXACT_OFFSETS_PER_PAGE as u32);
+
+        for _ in 0..n_recs {
+            let n_members = random.gen_range(1..(MULTIXACT_OFFSETS_PER_PAGE as usize));
+            let mut members = Vec::with_capacity(n_members);
+            let mut current_xid = random.gen();
+
+            for _ in 0..n_members {
+                members.push(MultiXactMember {
+                    xid: current_xid,
+                    status: random.gen::<u8>() as u32,
+                });
+
+                current_xid = current_xid.overflowing_add(random.gen_range(1..(u32::MAX / (MULTIXACT_MEMBERS_PER_PAGE as u32)))).0;
+            }
+
+            ret.push(ZenithWalRecord::MultixactMembersCreate {
+                moff: base_xactno + random.gen_range(0..(n_members as u32 * MULTIXACT_OFFSETS_PER_PAGE as u32)),
+                members,
+            })
+        }
+
+        (base_blockno, ret)
+    }
+
+    pub fn all_record_types() -> Vec<ZenithWalRecord> {
+        iter::empty()
+            .chain(various_pg_records().into_iter())
+            .chain(various_clvmf_records().into_iter())
+            .chain(various_clsc_records().into_iter())
+            .chain(various_clsa_records().into_iter())
+            .chain(various_mxoc_records().into_iter())
+            .chain(various_mxmc_records().into_iter())
+            .collect()
+    }
+
+    #[test]
+    fn test_default_serde_complete() {
+        let data = all_record_types();
+
+        let mut path = PathBuf::new();
+        path.push("test");
+        path.push("data");
+        path.push("serialized");
+        path.push("records");
+        
+        if !path.exists() {
+            fs::create_dir_all(path.as_path()).unwrap();
+        }
+
+        path.push("latest");
+
+        if !path.exists() {
+            let mut file = File::create(path.as_path()).unwrap();
+            <Vec<_> as BeSer>::ser_into(&data, &mut file).ok();
+
+            assert!(false, "New file created with latest output. Do check the status of your system");
+        } else {
+            let file = File::open(path.as_path()).unwrap();
+            let raw_data = file.bytes().map(|it| it.unwrap()).collect::<Vec<u8>>();
+
+            assert_eq!(
+                &raw_data,
+                &<Vec<ZenithWalRecord> as BeSer>::ser(&data).unwrap(),
+                "Latest serialized dataset does not equal the serialized form of the dataset"
+            );
+            assert_eq!(
+                &<Vec<ZenithWalRecord> as BeSer>::des(&raw_data[..]).unwrap()[..],
+                &data[..],
+                "Latest serialized dataset cannot be deserialized into the latest dataset"
+            );
+        }
+    }
+}

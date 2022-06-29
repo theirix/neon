@@ -158,7 +158,7 @@ impl Key {
 }
 
 /// A 'value' stored for a one Key.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub enum Value {
     /// An Image value contains a full copy of the value
     Image(Bytes),
