@@ -59,6 +59,10 @@ neon: postgres-headers
 	$(CARGO_CMD_PREFIX) cargo build $(CARGO_BUILD_FLAGS)
 
 ### PostgreSQL parts
+#
+# The rules are duplicated for Postgres v14 and 15. We may want to refactor
+# to avoid the duplication in the future, but it's tolerable for now.
+#
 $(POSTGRES_INSTALL_DIR)/build/v14/config.status:
 	+@echo "Configuring Postgres v14 build"
 	mkdir -p $(POSTGRES_INSTALL_DIR)/build/v14
@@ -67,10 +71,20 @@ $(POSTGRES_INSTALL_DIR)/build/v14/config.status:
 		$(PG_CONFIGURE_OPTS) \
 		--prefix=$(abspath $(POSTGRES_INSTALL_DIR))/v14 > configure.log)
 
-# nicer alias to run 'configure'
+$(POSTGRES_INSTALL_DIR)/build/v15/config.status:
+	+@echo "Configuring Postgres v15 build"
+	mkdir -p $(POSTGRES_INSTALL_DIR)/build/v15
+	(cd $(POSTGRES_INSTALL_DIR)/build/v15 && \
+	$(ROOT_PROJECT_DIR)/vendor/postgres-v15/configure CFLAGS='$(PG_CFLAGS)' \
+		$(PG_CONFIGURE_OPTS) \
+		--prefix=$(abspath $(POSTGRES_INSTALL_DIR))/v15 > configure.log)
+
+# nicer aliases to run 'configure'
 .PHONY: postgres-v14-configure
 postgres-v14-configure: $(POSTGRES_INSTALL_DIR)/build/v14/config.status
 
+.PHONY: postgres-v15-configure
+postgres-v15-configure: $(POSTGRES_INSTALL_DIR)/build/v15/config.status
 
 # Install the PostgreSQL header files into $(POSTGRES_INSTALL_DIR)/<version>/include
 .PHONY: postgres-v14-headers
@@ -78,31 +92,51 @@ postgres-v14-headers: postgres-v14-configure
 	+@echo "Installing PostgreSQL v14 headers"
 	$(MAKE) -C $(POSTGRES_INSTALL_DIR)/build/v14/src/include MAKELEVEL=0 install
 
+.PHONY: postgres-v15-headers
+postgres-v15-headers: postgres-v15-configure
+	+@echo "Installing PostgreSQL v15 headers"
+	$(MAKE) -C $(POSTGRES_INSTALL_DIR)/build/v15/src/include MAKELEVEL=0 install
+
 # Compile and install PostgreSQL and contrib/neon
 .PHONY: postgres-v14
 postgres-v14: postgres-v14-configure \
 		  postgres-v14-headers # to prevent `make install` conflicts with neon's `postgres-headers`
-	+@echo "Compiling PostgreSQL"
+	+@echo "Compiling PostgreSQL v14"
 	$(MAKE) -C $(POSTGRES_INSTALL_DIR)/build/v14 MAKELEVEL=0 install
-	+@echo "Compiling contrib/neon"
+	+@echo "Compiling contrib/neon (v14)"
 	$(MAKE) -C $(POSTGRES_INSTALL_DIR)/build/v14/contrib/neon install
-	+@echo "Compiling contrib/neon_test_utils"
+	+@echo "Compiling contrib/neon_test_utils (v14)"
 	$(MAKE) -C $(POSTGRES_INSTALL_DIR)/build/v14/contrib/neon_test_utils install
-	+@echo "Compiling pg_buffercache"
+	+@echo "Compiling pg_buffercache (v14)"
 	$(MAKE) -C $(POSTGRES_INSTALL_DIR)/build/v14/contrib/pg_buffercache install
-	+@echo "Compiling pageinspect"
+	+@echo "Compiling pageinspect (v14)"
 	$(MAKE) -C $(POSTGRES_INSTALL_DIR)/build/v14/contrib/pageinspect install
 
-# shorthand to build all Postgres versions
-postgres: postgres-v14
+.PHONY: postgres-v15
+postgres-v15: postgres-v15-configure \
+		  postgres-v15-headers # to prevent `make install` conflicts with neon's `postgres-headers`
+	+@echo "Compiling PostgreSQL v15"
+	$(MAKE) -C $(POSTGRES_INSTALL_DIR)/build/v15 MAKELEVEL=0 install
+	+@echo "Compiling contrib/neon (v15)"
+	$(MAKE) -C $(POSTGRES_INSTALL_DIR)/build/v15/contrib/neon install
+	+@echo "Compiling contrib/neon_test_utils (v15)"
+	$(MAKE) -C $(POSTGRES_INSTALL_DIR)/build/v15/contrib/neon_test_utils install
+	+@echo "Compiling pg_buffercache (15)"
+	$(MAKE) -C $(POSTGRES_INSTALL_DIR)/build/v15/contrib/pg_buffercache install
+	+@echo "Compiling pageinspect (v15)"
+	$(MAKE) -C $(POSTGRES_INSTALL_DIR)/build/v15/contrib/pageinspect install
 
-postgres-headers: postgres-v14-headers
+# shorthand to build all Postgres versions
+postgres: postgres-v14 postgres-v15
+
+postgres-headers: postgres-v14-headers postgres-v15-headers
 
 
 # This doesn't remove the effects of 'configure'.
 .PHONY: clean
 clean:
 	cd $(POSTGRES_INSTALL_DIR)/build/v14 && $(MAKE) clean
+	cd $(POSTGRES_INSTALL_DIR)/build/v15 && $(MAKE) clean
 	$(CARGO_CMD_PREFIX) cargo clean
 
 # This removes everything
