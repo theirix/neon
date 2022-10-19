@@ -55,9 +55,9 @@ def test_remote_storage_backup_and_restore(
     )
 
     data_id = 1
-    data_secret = "very secret secret"
+    data = "just some data"
 
-    ##### First start, insert secret data and upload it to the remote storage
+    ##### First start, insert data and upload it to the remote storage
     env = neon_env_builder.init_start()
 
     # FIXME: Is this expected?
@@ -99,8 +99,8 @@ def test_remote_storage_backup_and_restore(
         with pg.cursor() as cur:
             cur.execute(
                 f"""
-                CREATE TABLE t{checkpoint_number}(id int primary key, secret text);
-                INSERT INTO t{checkpoint_number} VALUES ({data_id}, '{data_secret}|{checkpoint_number}');
+                CREATE TABLE t{checkpoint_number}(id int primary key, data text);
+                INSERT INTO t{checkpoint_number} VALUES ({data_id}, '{data}|{checkpoint_number}');
             """
             )
             current_lsn = Lsn(query_scalar(cur, "SELECT pg_current_wal_flush_lsn()"))
@@ -136,21 +136,30 @@ def test_remote_storage_backup_and_restore(
     # Attach doesn't download anything, so, this should succeed
     client.tenant_attach(tenant_id)
 
+    detail = client.tenant_status(tenant_id)
+    log.info("Tenant status with active failpoint: %s", detail)
+
     # is there a better way to assert that failpoint triggered?
     time.sleep(10)
 
     # assert cannot attach timeline that is scheduled for download
-    # FIXME implement layer download retries
+    # FIXME: we used to keep retrying the initial download on failure.
+    # (We need to download some layers to calculate the logical size.)
+    # Now we mark the timeline as broken, instead.
+    # with pytest.raises(Exception, match="attach is already in progress"):
     with pytest.raises(Exception, match=f"tenant {tenant_id} already exists, state: Broken"):
         client.tenant_attach(tenant_id)
 
     tenant_status = client.tenant_status(tenant_id)
     log.info("Tenant status with active failpoint: %s", tenant_status)
-    # FIXME implement layer download retries
+    # FIXME see above
     # assert tenant_status["has_in_progress_downloads"] is True
 
     # trigger temporary download files removal
     env.pageserver.stop()
+    dir_to_clear = Path(env.repo_dir) / "tenants"
+    shutil.rmtree(dir_to_clear)
+    os.mkdir(dir_to_clear)
     env.pageserver.start()
 
     # ensure that an initiated attach operation survives pageserver restart
@@ -175,7 +184,6 @@ def test_remote_storage_backup_and_restore(
     assert (
         Lsn(detail["last_record_lsn"]) >= current_lsn
     ), "current db Lsn should should not be less than the one stored on remote storage"
-    assert not detail["awaits_download"]
 
     log.info("select some data, this will cause layers to be downloaded")
     # FIXME exercise code path where download fails
@@ -183,8 +191,8 @@ def test_remote_storage_backup_and_restore(
     with pg.cursor() as cur:
         for checkpoint_number in checkpoint_numbers:
             assert (
-                query_scalar(cur, f"SELECT secret FROM t{checkpoint_number} WHERE id = {data_id};")
-                == f"{data_secret}|{checkpoint_number}"
+                query_scalar(cur, f"SELECT data FROM t{checkpoint_number} WHERE id = {data_id};")
+                == f"{data}|{checkpoint_number}"
             )
 
 
