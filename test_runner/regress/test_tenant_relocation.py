@@ -13,12 +13,14 @@ from fixtures.neon_fixtures import (
     PageserverHttpClient,
     PortDistributor,
     Postgres,
-    assert_no_in_progress_downloads_for_tenant,
+    assert_tenant_status,
     wait_for_last_record_lsn,
     wait_for_upload,
+    wait_until,
+    wait_while,
 )
 from fixtures.types import Lsn, TenantId, TimelineId
-from fixtures.utils import query_scalar, start_in_background, subprocess_capture, wait_until
+from fixtures.utils import query_scalar, start_in_background, subprocess_capture
 
 
 def assert_abs_margin_ratio(a: float, b: float, margin_ratio: float):
@@ -408,15 +410,13 @@ def test_tenant_relocation(
 
             # check that it shows that download is in progress
             tenant_status = new_pageserver_http.tenant_status(tenant_id=tenant_id)
-            assert tenant_status.get("has_in_progress_downloads"), tenant_status
+            assert tenant_status["state"] == "Attaching"
 
             # wait until tenant is downloaded
             wait_until(
-                number_of_iterations=10,
+                number_of_iterations=100,
                 interval=1,
-                func=lambda: assert_no_in_progress_downloads_for_tenant(
-                    new_pageserver_http, tenant_id
-                ),
+                func=lambda: assert_tenant_status(new_pageserver_http, tenant_id, "Active"),
             )
 
             check_timeline_attached(
@@ -459,8 +459,15 @@ def test_tenant_relocation(
 
         # detach tenant from old pageserver before we check
         # that all the data is there to be sure that old pageserver
-        # is no longer involved, and if it is, we will see the errors
+        # is no longer involved, and if it is, we will see the error
         pageserver_http.tenant_detach(tenant_id)
+
+        # Wait a little, so that the detach operation has time to finish.
+        wait_while(
+            number_of_iterations=100,
+            interval=1,
+            func=lambda: assert_tenant_status(pageserver_http, tenant_id, "Stopping"),
+        )
 
         post_migration_check(pg_main, 500500, old_local_path_main)
         post_migration_check(pg_second, 1001000, old_local_path_second)
