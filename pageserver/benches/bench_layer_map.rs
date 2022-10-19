@@ -62,11 +62,14 @@ impl Layer for DummyDelta {
         false
     }
 
-    fn iter(&self) -> Box<dyn Iterator<Item = Result<(Key, Lsn, Value)>> + '_> {
+    fn iter(
+        &self,
+    ) -> Result<Box<dyn Iterator<Item = Result<(Key, Lsn, Value), anyhow::Error>>>, anyhow::Error>
+    {
         panic!()
     }
 
-    fn key_iter(&self) -> Box<dyn Iterator<Item = (Key, Lsn, u64)> + '_> {
+    fn key_iter(&self) -> Result<Box<dyn Iterator<Item = (Key, Lsn, u64)>>, anyhow::Error> {
         panic!("Not implemented")
     }
 
@@ -127,11 +130,14 @@ impl Layer for DummyImage {
         false
     }
 
-    fn iter(&self) -> Box<dyn Iterator<Item = Result<(Key, Lsn, Value)>> + '_> {
+    fn iter(
+        &self,
+    ) -> Result<Box<dyn Iterator<Item = Result<(Key, Lsn, Value), anyhow::Error>>>, anyhow::Error>
+    {
         panic!()
     }
 
-    fn key_iter(&self) -> Box<dyn Iterator<Item = (Key, Lsn, u64)> + '_> {
+    fn key_iter(&self) -> Result<Box<dyn Iterator<Item = (Key, Lsn, u64)>>, anyhow::Error> {
         panic!("Not implemented")
     }
 

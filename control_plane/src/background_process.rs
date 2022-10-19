@@ -23,7 +23,6 @@ use anyhow::{anyhow, bail, Context, Result};
 use nix::errno::Errno;
 use nix::sys::signal::{kill, Signal};
 use nix::unistd::Pid;
-
 use utils::lock_file;
 
 const RETRIES: u32 = 15;
