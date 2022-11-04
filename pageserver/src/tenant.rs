@@ -1433,7 +1433,6 @@ impl Tenant {
             None
         };
 
-        let new_disk_consistent_lsn = new_metadata.disk_consistent_lsn();
         let pg_version = new_metadata.pg_version();
         let new_timeline = Timeline::new(
             self.conf,
@@ -1446,10 +1445,6 @@ impl Tenant {
             pg_version,
             remote_client,
         );
-
-        new_timeline
-            .load_layer_map(new_disk_consistent_lsn)
-            .context("failed to load layermap")?;
 
         Ok(new_timeline)
     }
