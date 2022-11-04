@@ -717,7 +717,7 @@ async fn timeline_compact_handler(request: Request<Body>) -> Result<Response<Bod
         .map_err(ApiError::NotFound)?;
     let timeline = tenant
         .get_timeline(timeline_id, true)
-        .map_err(ApiError::NotFound)?;
+        .ok_or_else(|| ApiError::NotFound(anyhow!("timeline not found")))?;
     timeline
         .compact()
         .await
@@ -737,7 +737,7 @@ async fn timeline_checkpoint_handler(request: Request<Body>) -> Result<Response<
         .await
         .map_err(ApiError::NotFound)?;
     let timeline = tenant
-        .get_timeline(timeline_id)
+        .get_timeline(timeline_id, false /* XXX review false */)
         .with_context(|| format!("No timeline {timeline_id} in repository for tenant {tenant_id}"))
         .map_err(ApiError::NotFound)?;
     timeline
