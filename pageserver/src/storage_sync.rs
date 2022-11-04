@@ -341,6 +341,7 @@ impl RemoteTimelineClient {
         path: &RelativePath,
         layer_metadata: &LayerFileMetadata,
     ) -> Result<()> {
+        info!("downloading layer file {path:?}");
         let downloaded_size = download::download_layer_file(
             self.conf,
             &self.storage_impl,

@@ -145,7 +145,17 @@ pub async fn shutdown_all_tenants() {
     for tenant in tenants_to_shut_down.iter() {
         shutdown_tasks.push(tenant.shutdown());
     }
-    futures::future::join_all(shutdown_tasks).await;
+    let results = futures::future::join_all(shutdown_tasks).await;
+    for r in results.iter() {
+        if let Err(e) = r {
+            error!(error = %e, "tenant failed to shut down");
+        }
+    } 
+    if results.iter().all(|r| r.is_ok()) {
+        info!("all tenants shut down")
+    } else {
+        error!("some tenants had errors shutting down, check previous log messages");
+    }
 }
 
 pub fn create_tenant(

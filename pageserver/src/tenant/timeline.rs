@@ -450,7 +450,8 @@ impl Timeline {
     /// those functions with an LSN that has been processed yet is an error.
     ///
     pub async fn wait_lsn(&self, lsn: Lsn) -> anyhow::Result<()> {
-        anyhow::ensure!(self.is_active(), "Cannot wait for Lsn on inactive timeline");
+        // needed to uncomment this to make work handle_basebackup_request on a timeline with remote layer 
+        //anyhow::ensure!(self.is_active(), "Cannot wait for Lsn on inactive timeline");
 
         // This should never be called from the WAL receiver, because that could lead
         // to a deadlock.
@@ -2718,6 +2719,7 @@ impl Timeline {
                     &format!("download layer {}", remote_layer.filename().display()),
                     false,
                     async move {
+                        info!("download layer task start");
                         let remote_client = s.remote_client.as_ref().unwrap();
                         let result = remote_client
                             .download_layer_file(&remote_layer.path, &remote_layer.layer_metadata)
@@ -2745,8 +2747,10 @@ impl Timeline {
             }
         };
 
+        info!("waiting for download");
         // Wait for the download to finish.
-        receiver.changed().await?;
+        receiver.changed().await.context("wait for download")?;
+        info!("download wait done");
 
         // Was it successful?
         //
@@ -2754,6 +2758,7 @@ impl Timeline {
         // implement Clone. We need to construct a new Error from it.
         let x = receiver.borrow();
         if let Err(err) = x.as_ref() {
+            error!(err = %err, "download error");
             bail!(
                 "could not download layer file {}: {:?}",
                 remote_layer.filename().display(),

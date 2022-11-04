@@ -58,9 +58,9 @@ async fn compaction_loop(tenant: Arc<Tenant>) {
             let mut sleep_duration = tenant.get_compaction_period();
             if let Err(e) = tenant.compaction_iteration().await {
                 sleep_duration = wait_duration;
-                error!("Compaction failed, retrying in {:?}: {e:#}", sleep_duration);
-                #[cfg(feature = "testing")]
-                std::process::abort();
+                error!("Compaction failed, retrying in {:?}: {e:}", sleep_duration);
+                //#[cfg(feature = "testing")]
+                //std::process::abort();
             }
 
             // Sleep
@@ -101,8 +101,8 @@ async fn gc_loop(tenant: Arc<Tenant>) {
                 {
                     sleep_duration = wait_duration;
                     error!("Gc failed, retrying in {:?}: {e:#}", sleep_duration);
-                    #[cfg(feature = "testing")]
-                    std::process::abort();
+                    //#[cfg(feature = "testing")]
+                    //std::process::abort();
                 }
             }
 

@@ -173,6 +173,9 @@ impl PageServerNode {
             }
             Err(e) => eprintln!("{e:#}"),
         }
+
+        std::thread::sleep_ms(5000);
+
         match pageserver_process.kill() {
             Err(e) => {
                 eprintln!(

@@ -454,6 +454,8 @@ impl Tenant {
         // down when they notice that the tenant is inactive.
         // TODO maybe use tokio::sync::watch instead?
         crate::tenant_tasks::start_background_loops(self);
+        
+        // XXX do we need to start the flush loop somewhere?
 
         // We're ready for business.
         // FIXME: Check if the state has changed to Stopping while we were downloading stuff
@@ -675,12 +677,15 @@ impl Tenant {
     async fn load_timeline(&self, timeline_id: TimelineId) -> Result<Arc<Timeline>> {
         let timeline = self.load_local_timeline(timeline_id)?;
 
+
         if self.remote_storage.is_some() {
             // Reconcile local state with remote storage, downloading anything that's
             // missing locally, and scheduling uploads for anything that's missing
             // in remote storage.
             timeline.reconcile_with_remote(None, false).await?;
         }
+
+        timeline.maybe_spawn_flush_loop();
 
         Ok(timeline)
     }
@@ -730,6 +735,7 @@ impl UninitializedTimeline<'_> {
         })?;
 
         let new_disk_consistent_lsn = new_timeline.get_disk_consistent_lsn();
+        // hmm, maybe this assert is being violated?
         // TODO it would be good to ensure that, but apparently a lot of our testing is dependend on that at least
         // ensure!(new_disk_consistent_lsn.is_valid(),
         //     "Timeline {tenant_id}/{timeline_id} has invalid disk_consistent_lsn and cannot be initialized");
@@ -1272,7 +1278,9 @@ impl Tenant {
         let timelines: Vec<Arc<Timeline>> =
             self.timelines.lock().unwrap().values().cloned().collect();
         for timeline in timelines.iter() {
-            timeline.shutdown().await?;
+            if let Err(e) = timeline.shutdown().await {
+                error!(error = %e, "failed to shut down timeline");
+            }
         }
         info!("tenant shutdown complete");
 
@@ -2083,6 +2091,7 @@ impl Tenant {
                         self.tenant_id, value
                     );
                     receiver.changed().await?;
+                    info!("tenant {} changed from {:?} to {:?}", self.tenant_id, value, receiver.borrow());
                     continue;
                 }
                 TenantState::Stopping => {

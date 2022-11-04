@@ -619,7 +619,7 @@ impl PageServerHandler {
         let timeline = tenant
             .get_timeline(
                 timeline_id,
-                true, /* XXX no idea if true is right here */
+                false,
             )
             .ok_or_else(|| anyhow!("timeline {timeline_id} not found"))?;
         let latest_gc_cutoff_lsn = timeline.get_latest_gc_cutoff_lsn();
@@ -935,7 +935,7 @@ async fn get_active_timeline(
     timeline_id: TimelineId,
 ) -> Result<Arc<Timeline>> {
     let tenant = tenant_mgr::get_active_tenant(tenant_id).await?;
-    tenant.get_timeline(timeline_id, true).with_context(|| {
+    tenant.get_timeline(timeline_id, false /* XXX had to use false to make handle_pagerequests happy, but obviously, this funciton should be renamed */).with_context(|| {
         format!(
             "Timeline {} was not found for tenant {}",
             timeline_id, tenant_id
