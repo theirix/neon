@@ -5,6 +5,7 @@ on:
     branches:
       - main
       - release
+      - bayandin/compatibility-snapshot-for-pg15
   pull_request:
 
 defaults:
@@ -1205,7 +1206,8 @@ jobs:
       image: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/rust:pinned
       options: --init
     needs: [ deploy, deploy-proxy ]
-    if: github.ref_name == 'release' && github.event_name != 'workflow_dispatch'
+    # if: github.ref_name == 'release' && github.event_name != 'workflow_dispatch'
+    if: always()
     steps:
       - name: Promote compatibility snapshot for the release
         env:
