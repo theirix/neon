@@ -4,147 +4,242 @@
 //! size, outputs graphviz graph. Makefile in directory shows how to use graphviz to turn scenarios
 //! into pngs.
 
-use tenant_size_model::{Segment, SegmentSize, Storage};
+use tenant_size_model::{Segment, SizeResult, StorageModel};
 
-// Main branch only. Some updates on it.
-fn scenario_1() -> (Vec<Segment>, SegmentSize) {
-    // Create main branch
-    let mut storage = Storage::new("main");
+use std::collections::HashMap;
 
-    // Bulk load 5 GB of data to it
-    storage.insert("main", 5_000);
+struct ScenarioBuilder {
+    segments: Vec<Segment>,
 
-    // Stream of updates
-    for _ in 0..5 {
-        storage.update("main", 1_000);
+    /// Mapping from the branch name to the index of a segment describing its latest state.
+    branches: HashMap<String, usize>,
+}
+
+impl ScenarioBuilder {
+    /// Creates a new storage with the given default branch name.
+    pub fn new(initial_branch: &str) -> ScenarioBuilder {
+        let init_segment = Segment {
+            parent: None,
+            lsn: 0,
+            size: Some(0),
+            needed: false, // determined later
+        };
+
+        ScenarioBuilder {
+            segments: vec![init_segment],
+            branches: HashMap::from([(initial_branch.into(), 0)]),
+        }
     }
 
-    let size = storage.calculate(1000);
+    /// Advances the branch with the named operation, by the relative LSN and logical size bytes.
+    pub fn modify_branch(&mut self, branch: &str, lsn_bytes: u64, size_bytes: i64) {
+        let lastseg_id = *self.branches.get(branch).unwrap();
+        let newseg_id = self.segments.len();
+        let lastseg = &mut self.segments[lastseg_id];
 
-    (storage.into_segments(), size)
+        let newseg = Segment {
+            parent: Some(lastseg_id),
+            lsn: lastseg.lsn + lsn_bytes,
+            size: Some((lastseg.size.unwrap() as i64 + size_bytes) as u64),
+            needed: false,
+        };
+
+        self.segments.push(newseg);
+        *self.branches.get_mut(branch).expect("read already") = newseg_id;
+    }
+
+    pub fn insert(&mut self, branch: &str, bytes: u64) {
+        self.modify_branch(branch, bytes, bytes as i64);
+    }
+
+    pub fn update(&mut self, branch: &str, bytes: u64) {
+        self.modify_branch(branch, bytes, 0i64);
+    }
+
+    pub fn _delete(&mut self, branch: &str, bytes: u64) {
+        self.modify_branch(branch, bytes, -(bytes as i64));
+    }
+
+    /// Panics if the parent branch cannot be found.
+    pub fn branch(&mut self, parent: &str, name: &str) {
+        // Find the right segment
+        let branchseg_id = *self
+            .branches
+            .get(parent)
+            .expect("should had found the parent by key");
+        let _branchseg = &mut self.segments[branchseg_id];
+
+        // Create branch name for it
+        self.branches.insert(name.to_string(), branchseg_id);
+    }
+
+    pub fn calculate(&mut self, retention_period: u64) -> Vec<SizeResult> {
+        // Phase 1: Mark all the segments that need to be retained
+        for (_branch, &last_seg_id) in self.branches.iter() {
+            let last_seg = &self.segments[last_seg_id];
+            let cutoff_lsn = last_seg.lsn.saturating_sub(retention_period);
+            let mut seg_id = last_seg_id;
+            loop {
+                let seg = &mut self.segments[seg_id];
+                if seg.lsn < cutoff_lsn {
+                    break;
+                }
+                seg.needed = true;
+                if let Some(prev_seg_id) = seg.parent {
+                    seg_id = prev_seg_id;
+                } else {
+                    break;
+                }
+            }
+        }
+
+        // Perform the calculation
+        let storage_model = StorageModel {
+            segments: self.segments.clone(),
+        };
+        storage_model.calculate()
+    }
+
+    pub fn into_segments(self) -> Vec<Segment> {
+        self.segments
+    }
 }
 
 // Main branch only. Some updates on it.
-fn scenario_2() -> (Vec<Segment>, SegmentSize) {
+fn scenario_1() -> (Vec<Segment>, Vec<SizeResult>) {
     // Create main branch
-    let mut storage = Storage::new("main");
+    let mut scenario = ScenarioBuilder::new("main");
 
     // Bulk load 5 GB of data to it
-    storage.insert("main", 5_000);
+    scenario.insert("main", 5_000);
 
     // Stream of updates
     for _ in 0..5 {
-        storage.update("main", 1_000);
+        scenario.update("main", 1_000);
+    }
+
+    let size = scenario.calculate(1000);
+
+    (scenario.into_segments(), size)
+}
+
+// Main branch only. Some updates on it.
+fn scenario_2() -> (Vec<Segment>, Vec<SizeResult>) {
+    // Create main branch
+    let mut scenario = ScenarioBuilder::new("main");
+
+    // Bulk load 5 GB of data to it
+    scenario.insert("main", 5_000);
+
+    // Stream of updates
+    for _ in 0..5 {
+        scenario.update("main", 1_000);
     }
 
     // Branch
-    storage.branch("main", "child");
-    storage.update("child", 1_000);
+    scenario.branch("main", "child");
+    scenario.update("child", 1_000);
 
     // More updates on parent
-    storage.update("main", 1_000);
+    scenario.update("main", 1_000);
 
-    let size = storage.calculate(1000);
+    let size = scenario.calculate(1000);
 
-    (storage.into_segments(), size)
+    (scenario.into_segments(), size)
 }
 
 // Like 2, but more updates on main
-fn scenario_3() -> (Vec<Segment>, SegmentSize) {
+fn scenario_3() -> (Vec<Segment>, Vec<SizeResult>) {
     // Create main branch
-    let mut storage = Storage::new("main");
+    let mut scenario = ScenarioBuilder::new("main");
 
     // Bulk load 5 GB of data to it
-    storage.insert("main", 5_000);
+    scenario.insert("main", 5_000);
 
     // Stream of updates
     for _ in 0..5 {
-        storage.update("main", 1_000);
+        scenario.update("main", 1_000);
     }
 
     // Branch
-    storage.branch("main", "child");
-    storage.update("child", 1_000);
+    scenario.branch("main", "child");
+    scenario.update("child", 1_000);
 
     // More updates on parent
     for _ in 0..5 {
-        storage.update("main", 1_000);
+        scenario.update("main", 1_000);
     }
 
-    let size = storage.calculate(1000);
+    let size = scenario.calculate(1000);
 
-    (storage.into_segments(), size)
+    (scenario.into_segments(), size)
 }
 
 // Diverged branches
-fn scenario_4() -> (Vec<Segment>, SegmentSize) {
+fn scenario_4() -> (Vec<Segment>, Vec<SizeResult>) {
     // Create main branch
-    let mut storage = Storage::new("main");
+    let mut scenario = ScenarioBuilder::new("main");
 
     // Bulk load 5 GB of data to it
-    storage.insert("main", 5_000);
+    scenario.insert("main", 5_000);
 
     // Stream of updates
     for _ in 0..5 {
-        storage.update("main", 1_000);
+        scenario.update("main", 1_000);
     }
 
     // Branch
-    storage.branch("main", "child");
-    storage.update("child", 1_000);
+    scenario.branch("main", "child");
+    scenario.update("child", 1_000);
 
     // More updates on parent
     for _ in 0..8 {
-        storage.update("main", 1_000);
+        scenario.update("main", 1_000);
     }
 
-    let size = storage.calculate(1000);
+    let size = scenario.calculate(1000);
 
-    (storage.into_segments(), size)
+    (scenario.into_segments(), size)
 }
 
-fn scenario_5() -> (Vec<Segment>, SegmentSize) {
-    let mut storage = Storage::new("a");
-    storage.insert("a", 5000);
-    storage.branch("a", "b");
-    storage.update("b", 4000);
-    storage.update("a", 2000);
-    storage.branch("a", "c");
-    storage.insert("c", 4000);
-    storage.insert("a", 2000);
+fn scenario_5() -> (Vec<Segment>, Vec<SizeResult>) {
+    let mut scenario = ScenarioBuilder::new("a");
+    scenario.insert("a", 5000);
+    scenario.branch("a", "b");
+    scenario.update("b", 4000);
+    scenario.update("a", 2000);
+    scenario.branch("a", "c");
+    scenario.insert("c", 4000);
+    scenario.insert("a", 2000);
 
-    let size = storage.calculate(5000);
+    let size = scenario.calculate(5000);
 
-    (storage.into_segments(), size)
+    (scenario.into_segments(), size)
 }
 
-fn scenario_6() -> (Vec<Segment>, SegmentSize) {
-    use std::borrow::Cow;
-
-    const NO_OP: Cow<'static, str> = Cow::Borrowed("");
-
+fn scenario_6() -> (Vec<Segment>, Vec<SizeResult>) {
     let branches = [
-        Some(0x7ff1edab8182025f15ae33482edb590a_u128),
-        Some(0xb1719e044db05401a05a2ed588a3ad3f),
-        Some(0xb68d6691c895ad0a70809470020929ef),
+        "7ff1edab8182025f15ae33482edb590a",
+        "b1719e044db05401a05a2ed588a3ad3f",
+        "0xb68d6691c895ad0a70809470020929ef",
     ];
 
     // compared to other scenarios, this one uses bytes instead of kB
 
-    let mut storage = Storage::new(None);
+    let mut scenario = ScenarioBuilder::new("");
 
-    storage.branch(&None, branches[0]); // at 0
-    storage.modify_branch(&branches[0], NO_OP, 108951064, 43696128); // at 108951064
-    storage.branch(&branches[0], branches[1]); // at 108951064
-    storage.modify_branch(&branches[1], NO_OP, 15560408, -1851392); // at 124511472
-    storage.modify_branch(&branches[0], NO_OP, 174464360, -1531904); // at 283415424
-    storage.branch(&branches[0], branches[2]); // at 283415424
-    storage.modify_branch(&branches[2], NO_OP, 15906192, 8192); // at 299321616
-    storage.modify_branch(&branches[0], NO_OP, 18909976, 32768); // at 302325400
+    scenario.branch(&"", branches[0]); // at 0
+    scenario.modify_branch(&branches[0], 108951064, 43696128); // at 108951064
+    scenario.branch(&branches[0], branches[1]); // at 108951064
+    scenario.modify_branch(&branches[1], 15560408, -1851392); // at 124511472
+    scenario.modify_branch(&branches[0], 174464360, -1531904); // at 283415424
+    scenario.branch(&branches[0], branches[2]); // at 283415424
+    scenario.modify_branch(&branches[2], 15906192, 8192); // at 299321616
+    scenario.modify_branch(&branches[0], 18909976, 32768); // at 302325400
 
-    let size = storage.calculate(100_000);
+    let size = scenario.calculate(100_000);
 
-    (storage.into_segments(), size)
+    (scenario.into_segments(), size)
 }
 
 fn main() {
@@ -152,7 +247,7 @@ fn main() {
 
     let scenario = if args.len() < 2 { "1" } else { &args[1] };
 
-    let (segments, size) = match scenario {
+    let (_segments, _size) = match scenario {
         "1" => scenario_1(),
         "2" => scenario_2(),
         "3" => scenario_3(),
@@ -165,9 +260,13 @@ fn main() {
         }
     };
 
-    graphviz_tree(&segments, &size);
+    // FIXME: broken
+    //graphviz_tree(&segments, &size);
 }
 
+// FIXME: this is broken. Not sure if it's worth fixing it, or focus 100% on the
+// SVG version
+/*
 fn graphviz_recurse(segments: &[Segment], node: &SegmentSize) {
     use tenant_size_model::SegmentMethod::*;
 
@@ -248,6 +347,7 @@ fn graphviz_tree(segments: &[Segment], tree: &SegmentSize) {
 
     println!("}}");
 }
+ */
 
 #[test]
 fn scenarios_return_same_size() {

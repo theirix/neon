@@ -3556,6 +3556,9 @@ dependencies = [
 name = "tenant_size_model"
 version = "0.1.0"
 dependencies = [
+ "anyhow",
+ "serde",
+ "utils",
  "workspace_hack",
 ]
 

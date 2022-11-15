@@ -1,3 +1,5 @@
+use std::collections::HashMap;
+use std::str::FromStr;
 use std::sync::Arc;
 
 use anyhow::{anyhow, Context, Result};
@@ -264,20 +266,16 @@ fn query_param_present(request: &Request<Body>, param: &str) -> bool {
 }
 
 fn get_query_param(request: &Request<Body>, param_name: &str) -> Result<String, ApiError> {
-    request.uri().query().map_or(
-        Err(ApiError::BadRequest(anyhow!("empty query in request"))),
-        |v| {
-            url::form_urlencoded::parse(v.as_bytes())
-                .into_owned()
-                .find(|(k, _)| k == param_name)
-                .map_or(
-                    Err(ApiError::BadRequest(anyhow!(
-                        "no {param_name} specified in query parameters"
-                    ))),
-                    |(_, v)| Ok(v),
-                )
-        },
-    )
+    get_query_param_opt(request, param_name).ok_or_else(|| {
+        ApiError::BadRequest(anyhow!("no {param_name} specified in query parameters"))
+    })
+}
+
+fn get_query_param_opt(request: &Request<Body>, param_name: &str) -> Option<String> {
+    let mut query = url::form_urlencoded::parse(request.uri().query()?.as_bytes());
+    query
+        .find(|(k, _)| k == param_name)
+        .map(|(_, v)| v.into_owned())
 }
 
 async fn timeline_detail_handler(request: Request<Body>) -> Result<Response<Body>, ApiError> {
@@ -574,7 +572,7 @@ async fn tenant_size_handler(request: Request<Body>) -> Result<Response<Body>, A
 
     // this can be long operation, it currently is not backed by any request coalescing or similar
     let inputs = tenant
-        .gather_size_inputs()
+        .gather_size_inputs(None)
         .await
         .map_err(ApiError::InternalServerError)?;
 
@@ -602,6 +600,96 @@ async fn tenant_size_handler(request: Request<Body>) -> Result<Response<Body>, A
             inputs,
         },
     )
+}
+
+pub fn svg_response(status: StatusCode, data: Vec<u8>) -> Result<Response<Body>, ApiError> {
+    let response = Response::builder()
+        .status(status)
+        .header(hyper::header::CONTENT_TYPE, "image/svg+xml")
+        .body(Body::from(data))
+        .map_err(|e| ApiError::InternalServerError(e.into()))?;
+    Ok(response)
+}
+
+async fn tenant_size_debug_handler(request: Request<Body>) -> Result<Response<Body>, ApiError> {
+    let tenant_id: TenantId = parse_request_param(&request, "tenant_id")?;
+    let retention_period: Option<u64> = get_query_param_opt(&request, "retention_period")
+        .map(|v| {
+            u64::from_str(&v)
+                .map_err(|_| ApiError::BadRequest(anyhow!("failed to parse retention_period")))
+        })
+        .transpose()?;
+    check_permission(&request, Some(tenant_id))?;
+
+    let tenant = tenant_mgr::get_tenant(tenant_id, false).map_err(ApiError::InternalServerError)?;
+
+    // this can be long operation, it currently is not backed by any request coalescing or similar
+    let inputs = tenant
+        .gather_size_inputs(retention_period)
+        .await
+        .map_err(ApiError::InternalServerError)?;
+
+    let storage = inputs
+        .calculate_model()
+        .map_err(ApiError::InternalServerError)?;
+    let sizes = storage.calculate();
+
+    // find the roots
+    let mut total_size = 0;
+    for (seg_id, seg) in storage.segments.iter().enumerate() {
+        if seg.parent.is_none() {
+            total_size += sizes[seg_id].accum_size;
+        }
+    }
+
+    // Gather the extra info needed by draw_svg
+    let mut timeline_ids: Vec<String> = Vec::new();
+    let mut timeline_map: HashMap<TimelineId, usize> = HashMap::new();
+    for (index, ti) in inputs.timeline_inputs.iter().enumerate() {
+        timeline_map.insert(ti.timeline_id, index);
+        timeline_ids.push(ti.timeline_id.to_string());
+    }
+    let seg_to_branch: Vec<usize> = inputs
+        .segments
+        .iter()
+        .map(|seg| *timeline_map.get(&seg.timeline_id).unwrap())
+        .collect();
+
+    let svg = tenant_size_model::svg::draw_svg(&storage, &timeline_ids, &seg_to_branch, &sizes)
+        .map_err(|e| ApiError::InternalServerError(e.into()))?;
+
+    let mut response = String::new();
+
+    use std::fmt::Write;
+    write!(response, "<html>\n<body>\n").unwrap();
+    write!(response, "<div>\n{svg}\n</div>").unwrap();
+    write!(response, "Project size: {total_size}\n",).unwrap();
+    write!(response, "<pre>\n").unwrap();
+    write!(
+        response,
+        "{}\n",
+        serde_json::to_string_pretty(&inputs).unwrap()
+    )
+    .unwrap();
+    write!(
+        response,
+        "{}\n",
+        serde_json::to_string_pretty(&sizes).unwrap()
+    )
+    .unwrap();
+    write!(response, "</pre>\n").unwrap();
+    write!(response, "</body>\n</html>\n").unwrap();
+
+    html_response(StatusCode::OK, response)
+}
+
+pub fn html_response(status: StatusCode, data: String) -> Result<Response<Body>, ApiError> {
+    let response = Response::builder()
+        .status(status)
+        .header(hyper::header::CONTENT_TYPE, "text/html")
+        .body(Body::from(data.as_bytes().to_vec()))
+        .map_err(|e| ApiError::InternalServerError(e.into()))?;
+    Ok(response)
 }
 
 // Helper function to standardize the error messages we produce on bad durations
@@ -940,6 +1028,10 @@ pub fn make_router(
         .post("/v1/tenant", tenant_create_handler)
         .get("/v1/tenant/:tenant_id", tenant_status)
         .get("/v1/tenant/:tenant_id/size", tenant_size_handler)
+        .get(
+            "/v1/tenant/:tenant_id/size_debug",
+            tenant_size_debug_handler,
+        )
         .put("/v1/tenant/config", tenant_config_handler)
         .get("/v1/tenant/:tenant_id/timeline", timeline_list_handler)
         .post("/v1/tenant/:tenant_id/timeline", timeline_create_handler)

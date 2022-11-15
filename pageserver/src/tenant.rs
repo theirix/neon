@@ -1516,7 +1516,7 @@ impl Tenant {
     ///
     /// Future is cancellation safe. Only one calculation can be running at once per tenant.
     #[instrument(skip_all, fields(tenant_id=%self.tenant_id))]
-    pub async fn gather_size_inputs(&self) -> anyhow::Result<size::ModelInputs> {
+    pub async fn gather_size_inputs(&self, max_retention_period: Option<u64>) -> anyhow::Result<size::ModelInputs> {
         let logical_sizes_at_once = self
             .conf
             .concurrent_tenant_size_logical_size_queries
@@ -1528,7 +1528,7 @@ impl Tenant {
         // See more for on the issue #2748 condenced out of the initial PR review.
         let mut shared_cache = self.cached_logical_sizes.lock().await;
 
-        size::gather_inputs(self, logical_sizes_at_once, &mut *shared_cache).await
+        size::gather_inputs(self, logical_sizes_at_once, max_retention_period, &mut *shared_cache).await
     }
 }
 
