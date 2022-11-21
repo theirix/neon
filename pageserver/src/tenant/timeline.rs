@@ -1041,12 +1041,10 @@ impl Timeline {
 
         // Are we missing some files that are present in remote storage?
         // Download them now.
-        // TODO Downloading many files this way is not efficient.
-        //     Better to use FuturesUnordered. Maybe keep as is because:
-        //    a) inplace download is a throw-away code, on-demand patch doesnt need that
-        //    b) typical case now is that there is nothing to sync, this downloads a lot
-        //       1) if there was another pageserver that came and generated new files
-        //       2) during attach of a timeline with big history which we currently do not do
+        // NB: Theoretically we could speed this up by using FuturesUnordered.
+        // But practically, we use this only during tenant-attach, where we're
+        // network/IO throughput bound anyways.
+        // Further, this loop will be obsoleted soon by on-demand layer download.
         for path in remote_filenames.difference(&local_filenames) {
             let fname = path.to_str().unwrap();
             info!("remote layer file {fname} does not exist locally");
