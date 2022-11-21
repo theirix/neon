@@ -5,19 +5,20 @@ import os
 import shutil
 import time
 from pathlib import Path
+import re
 
 import pytest
 from fixtures.log_helper import log
 from fixtures.neon_fixtures import (
     NeonEnvBuilder,
     RemoteStorageKind,
-    assert_no_in_progress_downloads_for_tenant,
     available_remote_storages,
     wait_for_last_record_lsn,
+    wait_for_last_flush_lsn,
     wait_for_upload,
 )
 from fixtures.types import Lsn, TenantId, TimelineId
-from fixtures.utils import query_scalar, wait_until
+from fixtures.utils import query_scalar, wait_until, print_gc_result
 
 
 #
@@ -97,6 +98,15 @@ def test_remote_storage_backup_and_restore(
         pageserver_http.timeline_checkpoint(tenant_id, timeline_id)
 
         log.info(f"waiting for checkpoint {checkpoint_number} upload")
+
+        # insert upload failpoints to exercise retry code path
+        action = "3*return->off" if checkpoint_number == 0 else "off"
+        pageserver_http.configure_failpoints(
+            [
+                ("before-upload-layer", action),
+                ("before-upload-index", action),
+            ]
+        )
         # wait until pageserver successfully uploaded a checkpoint to remote storage
         wait_for_upload(client, tenant_id, timeline_id, current_lsn)
         log.info(f"upload of checkpoint {checkpoint_number} is done")
@@ -136,6 +146,7 @@ def test_remote_storage_backup_and_restore(
     env.pageserver.stop()
     env.pageserver.start()
     log.info("waiting for timeline to finish attaching")
+
     def assert_attach_fails_and_check_if_reached_active():
         with pytest.raises(Exception, match="tenant already exists.*(Attaching|Active)"):
             client.tenant_attach(tenant_id)
@@ -143,6 +154,7 @@ def test_remote_storage_backup_and_restore(
         [tenant] = [t for t in all_states if TenantId(t["id"]) == tenant_id]
         assert tenant["has_in_progress_downloads"] == False
         assert tenant["state"] == {"Active": {"background_jobs_running": True}}
+
     wait_until(
         number_of_iterations=20,
         interval=1,
@@ -163,3 +175,87 @@ def test_remote_storage_backup_and_restore(
                 query_scalar(cur, f"SELECT secret FROM t{checkpoint_number} WHERE id = {data_id};")
                 == f"{data_secret}|{checkpoint_number}"
             )
+
+
+@pytest.mark.parametrize("remote_storage_kind", [RemoteStorageKind.LOCAL_FS])
+def test_remote_storage_upload_queue_retries(
+    neon_env_builder: NeonEnvBuilder,
+    remote_storage_kind: RemoteStorageKind,
+):
+
+    neon_env_builder.enable_remote_storage(
+        remote_storage_kind=remote_storage_kind,
+        test_name="test_remote_storage_backup_and_restore",
+    )
+
+    env = neon_env_builder.init_start()
+
+    # create tenant with config that will determinstically allow
+    # compaction and gc
+    tenant_id, timeline_id = env.neon_cli.create_tenant(
+        conf={
+            # "gc_horizon": f"{1024 ** 2}",
+            "checkpoint_distance": f"{1024 ** 2}",
+            "compaction_threshold": "1",
+            "compaction_target_size": f"{1024 ** 2}",
+            # small PITR interval to allow gc
+            "pitr_interval": "1 s",
+        }
+    )
+
+    client = env.pageserver.http_client()
+
+    pg = env.postgres.create_start("main", tenant_id=tenant_id)
+
+    pg.safe_psql("CREATE TABLE foo (id INTEGER PRIMARY KEY, val text)")
+
+    def configure_storage_sync_failpoints(action):
+        client.configure_failpoints(
+            [
+                ("before-upload-layer", action),
+                ("before-upload-index", action),
+                ("before-delete-layer", action),
+            ]
+        )
+
+    def overwrite_data_and_wait_for_it_to_arrive_at_pageserver():
+        # create initial set of layers & upload them with failpoints configured
+        pg.safe_psql(
+            """
+               INSERT INTO foo (id, val)
+               SELECT g, CURRENT_TIMESTAMP
+               FROM generate_series(1, 100000) g
+               ON CONFLICT (id) DO UPDATE
+               SET val = EXCLUDED.val
+               """
+        )
+        wait_for_last_flush_lsn(env, pg, tenant_id, timeline_id)
+
+    # let all of them queue up
+    configure_storage_sync_failpoints("return")
+
+    overwrite_data_and_wait_for_it_to_arrive_at_pageserver()
+    client.timeline_checkpoint(tenant_id, timeline_id)
+    # now overwrite it again
+    overwrite_data_and_wait_for_it_to_arrive_at_pageserver()
+    # trigger layer deletion by doing Compaction, then GC
+    client.timeline_compact(tenant_id, timeline_id)
+    gc_result = client.timeline_gc(tenant_id, timeline_id, 0)
+    print_gc_result(gc_result)
+    assert gc_result["layers_removed"] > 0
+
+    # confirm all operations are queued up
+    def get_queued_count():
+        metrics = client.get_metrics()
+        matches = re.search(
+            f'^pageserver_remote_upload_queue_items{{tenant_id="{tenant_id}",timeline_id="{timeline_id}"}} (\\S+)$',
+            metrics,
+            re.MULTILINE,
+        )
+        assert matches
+
+    assert get_queued_count() > 0
+
+    configure_storage_sync_failpoints("off")
+
+    wait_until(10, 1, lambda: get_queued_count() == 0)
