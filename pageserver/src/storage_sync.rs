@@ -841,7 +841,7 @@ mod tests {
     use super::*;
     use crate::tenant::harness::{TenantHarness, TIMELINE_ID};
     use remote_storage::{RemoteStorageConfig, RemoteStorageKind};
-    use std::collections::HashSet;
+    use std::{collections::HashSet, sync::atomic::AtomicUsize};
     use utils::lsn::Lsn;
 
     pub(super) fn dummy_contents(name: &str) -> Vec<u8> {
@@ -1032,6 +1032,43 @@ mod tests {
         runtime.block_on(client.wait_completion())?;
 
         assert_remote_files(&["bar", "baz", "index_part.json"], &remote_timeline_dir);
+
+        // Test layer file uploads are retried and index uploads are queued behind them
+        let content_retry_layer = dummy_contents("retry_layer");
+        std::fs::write(timeline_path.join("retry_layer"), &content_retry_layer)?;
+        let retry_metadata = dummy_metadata(Lsn(0x30));
+
+        let fails = Arc::new(AtomicUsize::new(0));
+        // FIXME Does this affect concurrently running tests?
+        fail::cfg_callback("before-upload-layer", {
+            let fails = Arc::clone(&fails);
+            move || {
+                let prev = fails.fetch_add(1, Ordering::SeqCst);
+                match prev {
+                    0 => Some("first download causes error".to_owned()),
+                    1 => Some("second download also causes error".to_owned()),
+                    2 => None, // no error this time
+                    x => unreachable!(
+                        "there shouldn't be more retries after it worked in retry 2, got {x:?}"
+                    ),
+                }
+            }
+        });
+        client.schedule_layer_file_upload(
+            &timeline_path.join("retry_layer"),
+            &LayerFileMetadata::new(content_retry_layer.len() as u64),
+        )?;
+        client.schedule_index_upload(&retry_metadata)?;
+        {
+            let mut upload_queue = client.upload_queue.lock().unwrap();
+            assert!(upload_queue.queued_operations.len() == 2);
+        }
+        client.fail_layer_file_upload(|source_path| &timeline_path.join("retry_layer"));
+        runtime.block_on(client.wait_completion())?;
+        assert_eq!(fails.load(Ordering::SeqCst), 3);
+
+        //// Test index uploads are retried
+        //// Test deletes are retried
 
         Ok(())
     }
