@@ -78,11 +78,6 @@ def test_remote_storage_backup_and_restore(
     tenant_id = TenantId(pg.safe_psql("show neon.tenant_id")[0][0])
     timeline_id = TimelineId(pg.safe_psql("show neon.timeline_id")[0][0])
 
-    pageserver_http.configure_failpoints([
-        ("before-upload-index", "return->return->off"),
-        ("failpoint before-upload-layer", "return->off"),
-    ])
-
     checkpoint_numbers = range(1, 3)
 
     for checkpoint_number in checkpoint_numbers:
