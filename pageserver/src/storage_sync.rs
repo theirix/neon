@@ -79,6 +79,13 @@
 //! - We rely on read-after write consistency in the remote storage.
 //! - Layer files are immutable
 //!
+//! NB: Pageserver assumes that it has exclusive write access to the tenant in remote
+//! storage. Different tenants can be attached to different pageservers, but if the
+//! same tenant is attached to two pageservers at the same time, they will overwrite
+//! each other's index file updates, and confusion will ensue. There's no interlock or
+//! mechanism to detect that in the pageserver, we rely on the control plane to ensure
+//! that that doesn't happen.
+//!
 //! ## Implementation Note
 //!
 //! The *actual* remote state lags behind the *desired* remote state while
@@ -145,6 +152,10 @@
 //!
 //! # Downloads (= Tenant Attach)
 //!
+//! In addition to the upload queue, [`RemoteTimelineClient`] has functions for
+//! downloading files from the remote storage. Downloads are performed immediately,
+//! independently of the uploads.
+//!
 //! When we attach a tenant, we perform the following steps:
 //! - create `Tenant` object in `TenantState::Attaching` state
 //! - List timelines that are present in remote storage, and download their remote [`IndexPart`]s
@@ -174,60 +185,6 @@
 //! in remote storage.
 //! But note that we don't test any of this right now.
 //!
-//!
-//! # RANDOM NOTES FROM THE PAST (TODO: DELETE / DEDUP WITH CONTENT ABOVE)
-//!
-//! * pageserver assumes it has exclusive write access to the remote storage. If supported, the way multiple pageservers can be separated in the same storage
-//! (i.e. using different directories in the local filesystem external storage), but totally up to the storage implementation and not covered with the trait API.
-//!
-//! * the sync tasks may not processed immediately after the submission: if they error and get re-enqueued, their execution might be backed off to ensure error cap is not exceeded too fast.
-//! The sync queue processing also happens in batches, so the sync tasks can wait in the queue for some time.
-//!
-//! Uploads are queued and executed in the background and in parallel, enforcing the ordering rules.
-//! Downloads are performed immediately, and independently of the uploads.
-//!
-//! Deletion happens only after a successful upload only, otherwise the compaction output might make the timeline inconsistent until both tasks are fully processed without errors.
-//! Upload and download update the remote data (inmemory index and S3 json index part file) only after every layer is successfully synchronized, while the deletion task
-//! does otherwise: it requires to have the remote data updated first successfully: blob files will be invisible to pageserver this way.
-//!
-//! FIXME: how is the initial list of remote files created now? Update this paragraph
-//! During the loop startup, an initial [`RemoteTimelineIndex`] state is constructed via downloading and merging the index data for all timelines,
-//! present locally.
-//! It's enough to poll such timelines' remote state once on startup only, due to an agreement that only one pageserver at a time has an exclusive
-//! write access to remote portion of timelines that are attached to the pagegserver.
-//! The index state is used to issue initial sync tasks, if needed:
-//! * all timelines with local state behind the remote gets download tasks scheduled.
-//! Such timelines are considered "remote" before the download succeeds, so a number of operations (gc, checkpoints) on that timeline are unavailable
-//! before up-to-date layers and metadata file are downloaded locally.
-//! * all newer local state gets scheduled for upload, such timelines are "local" and fully operational
-//! * remote timelines not present locally are unknown to pageserver, but can be downloaded on a separate request
-//!
-//! Then, the index is shared across pageserver under [`RemoteIndex`] guard to ensure proper synchronization.
-//! The remote index gets updated after very remote storage change (after an upload), same as the index part files remotely.
-//!
-//! Remote timeline contains a set of layer files, created during checkpoint(s) and the serialized [`IndexPart`] file with timeline metadata and all remote layer paths inside.
-//! Those paths are used instead of `S3 list` command to avoid its slowliness and expenciveness for big amount of files.
-//! If the index part does not contain some file path but it's present remotely, such file is invisible to pageserver and ignored.
-//! Among other tasks, the index is used to prevent invalid uploads and non-existing downloads on demand, refer to [`index`] for more details.
-//!
-//! FIXME: update this paragraph
-//! Index construction is currently the only place where the storage sync can return an [`Err`] to the user.
-//! New sync tasks are accepted via [`schedule_layer_upload`], [`schedule_layer_download`] and [`schedule_layer_delete`] functions.
-//! After the initial state is loaded into memory and the loop starts, any further [`Err`] results do not stop the loop, but rather
-//! reschedule the same task, with possibly less files to sync:
-//! * download tasks currently never replace existing local file with metadata file as an exception
-//! (but this is a subject to change when checksum checks are implemented: all files could get overwritten on a checksum mismatch)
-//! * download tasks carry the information of skipped acrhives, so resubmissions are not downloading successfully processed layers again
-//! * downloads do not contain any actual files to download, so that "external", sync pageserver code is able to schedule the timeline download
-//! without accessing any extra information about its files.
-//!
-//! FIXME: update this paragraph
-//! Uploads and downloads sync layer files in arbitrary order, but only after all layer files are synched the local metadada (for download) and remote index part (for upload) are updated,
-//! to avoid having a corrupt state without the relevant layer files.
-//! Refer to [`upload`] and [`download`] for more details.
-//!
-//! Synchronization never removes any local files from pageserver workdir or remote files from the remote storage, yet there could be overwrites of the same files (index part and metadata file updates, future checksum mismatch fixes).
-//! NOTE: No real contents or checksum check happens right now and is a subject to improve later.
 
 mod delete;
 mod download;
