@@ -200,15 +200,17 @@ def test_remote_storage_upload_queue_retries(
     # compaction and gc
     tenant_id, timeline_id = env.neon_cli.create_tenant(
         conf={
-            # small checkpointing and compaction targets to ensure we generate many operations
+            # small checkpointing and compaction targets to ensure we generate many upload operations
             "checkpoint_distance": f"{128 * 1024}",
             "compaction_threshold": "1",
             "compaction_target_size": f"{128 * 1024}",
-            # large horizon to avoid automatic GC (our assert on gc_result below relies on that)
-            "gc_horizon": f"{1024 ** 4}",
-            "gc_period": "1h",
-            # disable PITR so that GC considers just gc_horizon
+            # no PITR horizon, we specify the horizon when we request on-demand GC
             "pitr_interval": "0s",
+            # disable background compaction and GC. We invoke it manually when we want it to happen.
+            "gc_period": "0s",
+            "compaction_period": "0s",
+            # don't create image layers, that causes just noise
+            "image_creation_threshold": "10000",
         }
     )
 
@@ -280,7 +282,9 @@ def test_remote_storage_upload_queue_retries(
     def churn_while_failpoints_active(result):
         overwrite_data_and_wait_for_it_to_arrive_at_pageserver("c")
         client.timeline_checkpoint(tenant_id, timeline_id)
+        client.timeline_compact(tenant_id, timeline_id)
         overwrite_data_and_wait_for_it_to_arrive_at_pageserver("d")
+        client.timeline_checkpoint(tenant_id, timeline_id)
         client.timeline_compact(tenant_id, timeline_id)
         gc_result = client.timeline_gc(tenant_id, timeline_id, 0)
         print_gc_result(gc_result)
