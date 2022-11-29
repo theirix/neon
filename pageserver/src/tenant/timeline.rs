@@ -2295,9 +2295,6 @@ impl Timeline {
 
         // Also schedule the deletions in remote storage
         if let Some(remote_client) = &self.remote_client {
-            // FIXME: This also uploads new index file. If
-            // flush_frozen_layer() is doing this at the same time, do
-            // we have a problem?
             remote_client.schedule_layer_file_deletion(&layer_paths_to_delete)?;
         }
 
