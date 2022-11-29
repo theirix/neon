@@ -2094,9 +2094,10 @@ impl Tenant {
             format!("Failed to import pgdatadir for timeline {tenant_id}/{timeline_id}")
         })?;
 
-        // Flush loop needs to be spawned in order for checkpoint to be able to flush.
-        // We want to run proper checkpoint before we mark timeline as available to outside world
-        // Thus spawning flush loop manually and skipping flush_loop setup in initialize_with_lock
+        // Flush the new layer files to disk, before we mark the timeline as available to
+        // the outside world.
+        //
+        // Thus spawn flush loop manually and skip flush_loop setup in initialize_with_lock
         unfinished_timeline.maybe_spawn_flush_loop();
 
         fail::fail_point!("before-checkpoint-new-timeline", |_| {
@@ -2104,7 +2105,7 @@ impl Tenant {
         });
 
         unfinished_timeline
-            .checkpoint(CheckpointConfig::Forced).await
+            .checkpoint(CheckpointConfig::Flush).await
             .with_context(|| format!("Failed to checkpoint after pgdatadir import for timeline {tenant_id}/{timeline_id}"))?;
 
         let timeline = {
@@ -2602,7 +2603,11 @@ pub mod harness {
             // OK in a test.
             let conf: &'static PageServerConf = Box::leak(Box::new(conf));
 
-            let tenant_conf = TenantConf::dummy_conf();
+            // Disable automatic GC and compaction to make the unit tests more deterministic.
+            // The tests perform them manually if needed.
+            let mut tenant_conf = TenantConf::dummy_conf();
+            tenant_conf.gc_period = Duration::ZERO;
+            tenant_conf.compaction_period = Duration::ZERO;
 
             let tenant_id = TenantId::generate();
             fs::create_dir_all(conf.tenant_path(&tenant_id))?;

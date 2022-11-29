@@ -7,26 +7,12 @@ use std::time::Duration;
 
 use crate::metrics::TENANT_TASK_EVENTS;
 use crate::task_mgr;
+use crate::task_mgr::{TaskKind, BACKGROUND_RUNTIME};
 use crate::tenant::{Tenant, TenantState};
 use crate::tenant_mgr;
 use tracing::*;
 use utils::id::TenantId;
 
-#[cfg(test)]
-pub fn start_background_loops(tenant_id: TenantId) {
-    // Do not start the background loops.
-    // Right now, in tests, Tenant is only created by TenantHarness,
-    // and all tests that use TenantHarness assume that there are
-    // no background loops that do compaction and GC. If they want it
-    // to happen, they call the corresponding functions directly.
-    //
-    // XXX replace this with a TenantConfigRequest flag that is
-    // also usable by tests, see https://github.com/neondatabase/neon/issues/2917
-}
-
-#[cfg(not(test))]
-use crate::task_mgr::{TaskKind, BACKGROUND_RUNTIME};
-#[cfg(not(test))]
 pub fn start_background_loops(tenant_id: TenantId) {
     task_mgr::spawn(
         BACKGROUND_RUNTIME.handle(),
@@ -80,13 +66,17 @@ async fn compaction_loop(tenant_id: TenantId) {
                 },
             };
 
-            // Run blocking part of the task
-
-            // Run compaction
             let mut sleep_duration = tenant.get_compaction_period();
-            if let Err(e) = tenant.compaction_iteration().await {
-                sleep_duration = wait_duration;
-                error!("Compaction failed, retrying in {:?}: {e:?}", sleep_duration);
+            if sleep_duration == Duration::ZERO {
+                info!("automatic compaction is disabled");
+                // check again in 10 seconds, in case it's been enabled again.
+                sleep_duration = Duration::from_secs(10);
+            } else {
+                // Run compaction
+                if let Err(e) = tenant.compaction_iteration().await {
+                    sleep_duration = wait_duration;
+                    error!("Compaction failed, retrying in {:?}: {e:?}", sleep_duration);
+                }
             }
 
             // Sleep
@@ -127,15 +117,21 @@ async fn gc_loop(tenant_id: TenantId) {
                 },
             };
 
-            // Run gc
             let gc_period = tenant.get_gc_period();
             let gc_horizon = tenant.get_gc_horizon();
             let mut sleep_duration = gc_period;
-            if gc_horizon > 0 {
-                if let Err(e) = tenant.gc_iteration(None, gc_horizon, tenant.get_pitr_interval(), false).await
-                {
-                    sleep_duration = wait_duration;
-                    error!("Gc failed, retrying in {:?}: {e:?}", sleep_duration);
+            if sleep_duration == Duration::ZERO {
+                info!("automatic GC is disabled");
+                // check again in 10 seconds, in case it's been enabled again.
+                sleep_duration = Duration::from_secs(10);
+            } else {
+                // Run gc
+                if gc_horizon > 0 {
+                    if let Err(e) = tenant.gc_iteration(None, gc_horizon, tenant.get_pitr_interval(), false).await
+                    {
+                        sleep_duration = wait_duration;
+                        error!("Gc failed, retrying in {:?}: {e:?}", sleep_duration);
+                    }
                 }
             }
 
