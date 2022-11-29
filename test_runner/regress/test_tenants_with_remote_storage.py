@@ -161,13 +161,14 @@ def test_tenants_attached_after_download(
     ##### Stop the pageserver, erase its layer file to force it being downloaded from S3
     env.postgres.stop_all()
 
-    log.info("take another checkpoint in case postgres wrote some more WAL upon shutdown")
-    pageserver_http.timeline_checkpoint(tenant_id, timeline_id)
     sk_commit_lsns = [
         sk.http_client().timeline_status(tenant_id, timeline_id).commit_lsn
         for sk in env.safekeepers
     ]
+    log.info("wait for pageserver to process all the WAL")
+    wait_for_last_record_lsn(client, tenant_id, timeline_id, max(sk_commit_lsns))
     log.info("wait for it to reach remote storage")
+    pageserver_http.timeline_checkpoint(tenant_id, timeline_id)
     wait_for_upload(client, tenant_id, timeline_id, max(sk_commit_lsns))
     log.info("latest safekeeper_commit_lsn reached remote storage")
 

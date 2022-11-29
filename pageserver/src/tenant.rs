@@ -441,8 +441,6 @@ struct RemoteStartupData {
     remote_metadata: TimelineMetadata,
 }
 
-/// A repository corresponds to one .neon directory. One repository holds multiple
-/// timelines, forked off from the same initial call to 'initdb'.
 impl Tenant {
     /// Yet another helper for timeline initialization.
     /// Contains common part for `load_local_timeline` and `load_remote_timeline`
