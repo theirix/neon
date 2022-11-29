@@ -1767,6 +1767,7 @@ class NeonPageserver(PgProtocol):
             ".*wait for layer upload ops to complete.*",  # .*Caused by:.*wait_completion aborted because upload queue was stopped
             ".*gc_loop.*Gc failed, retrying in.*timeline is paused: Paused",  # When gc checks timeline state after acquiring layer_removal_cs
             ".*compaction_loop.*Compaction failed, retrying in.*timeline is paused: Paused",  # When compaction checks timeline state after acquiring layer_removal_cs
+            ".*query handler for 'pagestream.*failed: Timeline .* was not found",  # postgres reconnects while timeline_delete doesn't hold the tenant's timelines.lock()
         ]
 
     def start(
