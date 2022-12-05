@@ -29,6 +29,8 @@ use std::ops::Range;
 use std::path::PathBuf;
 use std::sync::RwLock;
 
+use super::filename::LayerFileName;
+
 thread_local! {
     /// A buffer for serializing object during [`InMemoryLayer::put_value`].
     /// This buffer is reused for each serialization to avoid additional malloc calls.
@@ -79,18 +81,18 @@ impl Layer for InMemoryLayer {
     // An in-memory layer can be spilled to disk into ephemeral file,
     // This function is used only for debugging, so we don't need to be very precise.
     // Construct a filename as if it was a delta layer.
-    fn filename(&self) -> PathBuf {
+    fn filename(&self) -> LayerFileName {
         let inner = self.inner.read().unwrap();
 
         let end_lsn = inner.end_lsn.unwrap_or(Lsn(u64::MAX));
 
-        PathBuf::from(format!(
+        LayerFileName::Inmemory(format!(
             "inmem-{:016X}-{:016X}",
             self.start_lsn.0, end_lsn.0
         ))
     }
 
-    fn local_path(&self) -> Option<PathBuf> {
+    fn local_path(&self) -> Option<LayerFileName> {
         None
     }
 

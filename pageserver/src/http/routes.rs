@@ -80,7 +80,7 @@ fn check_permission(request: &Request<Body>, tenant_id: Option<TenantId>) -> Res
 }
 
 // Helper function to construct a TimelineInfo struct for a timeline
-fn build_timeline_info(
+async fn build_timeline_info(
     tenant_state: TenantState,
     timeline: &Arc<Timeline>,
     include_non_incremental_logical_size: bool,
@@ -88,8 +88,11 @@ fn build_timeline_info(
 ) -> anyhow::Result<TimelineInfo> {
     let mut info = build_timeline_info_common(tenant_state, timeline)?;
     if include_non_incremental_logical_size {
-        info.current_logical_size_non_incremental =
-            Some(timeline.get_current_logical_size_non_incremental(info.last_record_lsn)?);
+        info.current_logical_size_non_incremental = Some(
+            timeline
+                .get_current_logical_size_non_incremental(info.last_record_lsn)
+                .await?,
+        );
     }
     if include_non_incremental_physical_size {
         info.current_physical_size_non_incremental =
@@ -232,12 +235,12 @@ async fn timeline_list_handler(request: Request<Body>) -> Result<Response<Body>,
                 include_non_incremental_logical_size,
                 include_non_incremental_physical_size,
             )
+            .await
             .context("Failed to convert tenant timeline {timeline_id} into the local one: {e:?}")
             .map_err(ApiError::InternalServerError)?;
 
-            response_data.push(timeline_info);
+                response_data.push(timeline_info);
         }
-
         Ok(response_data)
     }
     .instrument(info_span!("timeline_list", tenant = %tenant_id))
@@ -300,6 +303,7 @@ async fn timeline_detail_handler(request: Request<Body>) -> Result<Response<Body
             include_non_incremental_logical_size,
             include_non_incremental_physical_size,
         )
+        .await
         .context("Failed to get local timeline info: {e:#}")
         .map_err(ApiError::InternalServerError)?;
 
@@ -326,11 +330,14 @@ async fn get_lsn_by_timestamp_handler(request: Request<Body>) -> Result<Response
         .await
         .and_then(|tenant| tenant.get_timeline(timeline_id, true))
         .map_err(ApiError::NotFound)?;
-    let result = match timeline
-        .find_lsn_for_timestamp(timestamp_pg)
-        .context("find_lsn_for_timestamp")
-        .map_err(ApiError::InternalServerError)?
-    {
+    let result = crate::tenant::retry_get_with_timeout(
+        || timeline.find_lsn_for_timestamp(timestamp_pg),
+        std::time::Duration::from_secs(60),
+    )
+    .await
+    .map_err(ApiError::InternalServerError)?;
+
+    let result = match result {
         LsnForTimestamp::Present(lsn) => format!("{lsn}"),
         LsnForTimestamp::Future(_lsn) => "future".into(),
         LsnForTimestamp::Past(_lsn) => "past".into(),

@@ -6,8 +6,8 @@ use std::path::Path;
 use tokio::fs;
 
 use super::index::IndexPart;
-use crate::config::PageServerConf;
 use crate::storage_sync::LayerFileMetadata;
+use crate::{config::PageServerConf, tenant::filename::LayerFileName};
 use remote_storage::GenericRemoteStorage;
 use utils::id::{TenantId, TimelineId};
 

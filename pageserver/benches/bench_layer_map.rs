@@ -1,6 +1,6 @@
 use anyhow::Result;
 use pageserver::repository::{Key, Value};
-use pageserver::tenant::filename::{DeltaFileName, ImageFileName};
+use pageserver::tenant::filename::{DeltaFileName, ImageFileName, LayerFileName};
 use pageserver::tenant::layer_map::LayerMap;
 use pageserver::tenant::storage_layer::Layer;
 use pageserver::tenant::storage_layer::ValueReconstructResult;
@@ -41,11 +41,11 @@ impl Layer for DummyDelta {
         self.lsn_range.clone()
     }
 
-    fn filename(&self) -> PathBuf {
+    fn filename(&self) -> LayerFileName {
         todo!()
     }
 
-    fn local_path(&self) -> Option<PathBuf> {
+    fn local_path(&self) -> Option<LayerFileName> {
         todo!()
     }
 
@@ -106,11 +106,11 @@ impl Layer for DummyImage {
         self.lsn..(self.lsn + 1)
     }
 
-    fn filename(&self) -> PathBuf {
+    fn filename(&self) -> LayerFileName {
         todo!()
     }
 
-    fn local_path(&self) -> Option<PathBuf> {
+    fn local_path(&self) -> Option<LayerFileName> {
         todo!()
     }
 

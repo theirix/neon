@@ -11,7 +11,7 @@ use std::path::PathBuf;
 use utils::lsn::Lsn;
 
 // Note: Timeline::load_layer_map() relies on this sort order
-#[derive(Debug, PartialEq, Eq, Clone)]
+#[derive(Debug, PartialEq, Eq, Clone, Hash)]
 pub struct DeltaFileName {
     pub key_range: Range<Key>,
     pub lsn_range: Range<Lsn>,
@@ -101,7 +101,7 @@ impl fmt::Display for DeltaFileName {
     }
 }
 
-#[derive(Debug, PartialEq, Eq, Clone)]
+#[derive(Debug, PartialEq, Eq, Clone, Hash)]
 pub struct ImageFileName {
     pub key_range: Range<Key>,
     pub lsn: Lsn,
@@ -170,6 +170,93 @@ impl fmt::Display for ImageFileName {
             self.key_range.end,
             u64::from(self.lsn),
         )
+    }
+}
+
+#[derive(Debug, PartialEq, Eq, Hash, Clone)]
+pub enum LayerFileName {
+    Image(ImageFileName),
+    Delta(DeltaFileName),
+    Inmemory(String),
+}
+
+impl LayerFileName {
+    pub fn file_name(&self) -> String {
+        match self {
+            LayerFileName::Image(fname) => format!("{fname}"),
+            LayerFileName::Delta(fname) => format!("{fname}"),
+            LayerFileName::Inmemory(fname) => format!("{fname}"),
+        }
+    }
+}
+
+impl From<ImageFileName> for LayerFileName {
+    fn from(fname: ImageFileName) -> Self {
+        LayerFileName::Image(fname)
+    }
+}
+impl From<DeltaFileName> for LayerFileName {
+    fn from(fname: DeltaFileName) -> Self {
+        LayerFileName::Delta(fname)
+    }
+}
+
+impl<'a> TryFrom<&'a str> for LayerFileName {
+    type Error = String;
+
+    fn try_from(value: &'a str) -> Result<Self, Self::Error> {
+        let delta = DeltaFileName::parse_str(value.as_ref());
+        let image = ImageFileName::parse_str(value.as_ref());
+        let ok = match (delta, image) {
+            (None, None) => return Err(format!("neither delta nor image layer file name: {value:?}")),
+            (Some(delta), None) => LayerFileName::Delta(delta),
+            (None, Some(image)) => LayerFileName::Image(image),
+            (Some(a), Some(b)) => unreachable!(),
+        };
+        Ok(ok)
+    }
+}
+
+impl LayerFileName {
+    pub fn display(&self) -> impl std::fmt::Display {
+        self.file_name()
+    }
+}
+
+impl serde::Serialize for LayerFileName {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        serializer.serialize_str(&self.file_name())
+    }
+}
+
+struct LayerFileNameVisitor;
+
+impl<'de> serde::de::Visitor<'de> for LayerFileNameVisitor {
+    type Value = LayerFileName;
+
+    fn expecting(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
+        write!(
+            formatter,
+            "a string that is a valid image or delta layer file name"
+        )
+    }
+    fn visit_str<E>(self, v: &str) -> Result<Self::Value, E>
+    where
+        E: serde::de::Error,
+    {
+        LayerFileName::try_from(v).map_err(|e| E::custom(e))
+    }
+}
+
+impl<'de> serde::Deserialize<'de> for LayerFileName {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::de::Deserializer<'de>,
+    {
+        deserializer.deserialize_str(LayerFileNameVisitor)
     }
 }
 
