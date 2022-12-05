@@ -91,6 +91,7 @@ pub mod size;
 
 use storage_layer::Layer;
 
+pub use timeline::PageReconstructError;
 pub use timeline::Timeline;
 
 // re-export this function so that page_cache.rs can use it.
