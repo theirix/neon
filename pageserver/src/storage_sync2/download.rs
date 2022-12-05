@@ -136,6 +136,10 @@ pub async fn list_remote_timelines<'a>(
     let tenant_path = conf.timelines_path(&tenant_id);
     let tenant_storage_path = conf.remote_path(&tenant_path)?;
 
+    fail::fail_point!("storage-sync-list-remote-timelines", |_| {
+        anyhow::bail!("storage-sync-list-remote-timelines");
+    });
+
     let timelines = storage
         .list_prefixes(Some(&tenant_storage_path))
         .await
