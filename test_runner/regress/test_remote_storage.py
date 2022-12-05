@@ -14,7 +14,6 @@ from fixtures.neon_fixtures import (
     NeonEnvBuilder,
     PageserverApiException,
     RemoteStorageKind,
-    assert_no_in_progress_downloads_for_tenant,
     available_remote_storages,
     wait_for_last_flush_lsn,
     wait_for_last_record_lsn,
@@ -129,8 +128,12 @@ def test_remote_storage_backup_and_restore(
     env.pageserver.start()
 
     # Introduce failpoint in download
-    pageserver_http.configure_failpoints(("remote-storage-download-pre-rename", "return"))
+    pageserver_http.configure_failpoints(("storage-sync-list-remote-timelines", "return"))
+    env.pageserver.allowed_errors.append(
+        ".*error attaching tenant: storage-sync-list-remote-timelines",
+    )
 
+    # Attach doesn't download anything, so, this should succeed
     client.tenant_attach(tenant_id)
 
     # is there a better way to assert that failpoint triggered?
@@ -153,11 +156,18 @@ def test_remote_storage_backup_and_restore(
     # ensure that an initiated attach operation survives pageserver restart
     with pytest.raises(Exception, match=f"tenant {tenant_id} already exists, state:"):
         client.tenant_attach(tenant_id)
-    log.info("waiting for timeline redownload")
+    log.info("waiting for tenant to become active. this should be quick with on-demand download")
+
+    def tenant_active():
+        all_states = client.tenant_list()
+        [tenant] = [t for t in all_states if TenantId(t["id"]) == tenant_id]
+        assert tenant["has_in_progress_downloads"] is False
+        assert tenant["state"] == "Active"
+
     wait_until(
-        number_of_iterations=20,
+        number_of_iterations=5,
         interval=1,
-        func=lambda: assert_no_in_progress_downloads_for_tenant(client, tenant_id),
+        func=tenant_active,
     )
 
     detail = client.timeline_detail(tenant_id, timeline_id)
@@ -167,6 +177,8 @@ def test_remote_storage_backup_and_restore(
     ), "current db Lsn should should not be less than the one stored on remote storage"
     assert not detail["awaits_download"]
 
+    log.info("select some data, this will cause layers to be downloaded")
+    # FIXME exercise code path where download fails
     pg = env.postgres.create_start("main")
     with pg.cursor() as cur:
         for checkpoint_number in checkpoint_numbers:
