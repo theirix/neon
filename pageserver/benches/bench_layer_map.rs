@@ -1,10 +1,10 @@
 use anyhow::Result;
-use pageserver::repository::{Key, Value};
+use pageserver::repository::Key;
 use pageserver::tenant::filename::{DeltaFileName, ImageFileName};
 use pageserver::tenant::layer_map::LayerMap;
-use pageserver::tenant::storage_layer::Layer;
 use pageserver::tenant::storage_layer::ValueReconstructResult;
 use pageserver::tenant::storage_layer::ValueReconstructState;
+use pageserver::tenant::storage_layer::{Layer, LayerIter, LayerKeyIter};
 use rand::prelude::{SeedableRng, SliceRandom, StdRng};
 use std::cmp::{max, min};
 use std::fs::File;
@@ -66,11 +66,11 @@ impl Layer for DummyDelta {
         false
     }
 
-    fn iter(&self) -> Box<dyn Iterator<Item = Result<(Key, Lsn, Value)>> + '_> {
+    fn iter(&self) -> Result<LayerIter<'_>> {
         panic!()
     }
 
-    fn key_iter(&self) -> Box<dyn Iterator<Item = (Key, Lsn, u64)> + '_> {
+    fn key_iter(&self) -> Result<LayerKeyIter<'_>> {
         panic!("Not implemented")
     }
 
@@ -131,11 +131,11 @@ impl Layer for DummyImage {
         false
     }
 
-    fn iter(&self) -> Box<dyn Iterator<Item = Result<(Key, Lsn, Value)>> + '_> {
+    fn iter(&self) -> Result<LayerIter<'_>> {
         panic!()
     }
 
-    fn key_iter(&self) -> Box<dyn Iterator<Item = (Key, Lsn, u64)> + '_> {
+    fn key_iter(&self) -> Result<LayerKeyIter<'_>> {
         panic!("Not implemented")
     }
 

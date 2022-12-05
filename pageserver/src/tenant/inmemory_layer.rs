@@ -29,6 +29,8 @@ use std::ops::Range;
 use std::path::PathBuf;
 use std::sync::RwLock;
 
+use super::storage_layer::LayerIter;
+
 thread_local! {
     /// A buffer for serializing object during [`InMemoryLayer::put_value`].
     /// This buffer is reused for each serialization to avoid additional malloc calls.
@@ -166,7 +168,7 @@ impl Layer for InMemoryLayer {
         }
     }
 
-    fn iter(&self) -> Box<dyn Iterator<Item = Result<(Key, Lsn, Value)>>> {
+    fn iter(&self) -> Result<LayerIter<'_>> {
         todo!();
     }
 

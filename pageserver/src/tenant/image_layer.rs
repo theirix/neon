@@ -182,7 +182,7 @@ impl Layer for ImageLayer {
         }
     }
 
-    fn iter(&self) -> LayerIter<'_> {
+    fn iter(&self) -> Result<LayerIter<'_>> {
         todo!();
     }
 

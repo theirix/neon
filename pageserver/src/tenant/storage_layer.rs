@@ -143,11 +143,11 @@ pub trait Layer: Send + Sync {
     fn is_in_memory(&self) -> bool;
 
     /// Iterate through all keys and values stored in the layer
-    fn iter(&self) -> LayerIter<'_>;
+    fn iter(&self) -> Result<LayerIter<'_>>;
 
     /// Iterate through all keys stored in the layer. Returns key, lsn and value size
     /// It is used only for compaction and so is currently implemented only for DeltaLayer
-    fn key_iter(&self) -> LayerKeyIter<'_> {
+    fn key_iter(&self) -> Result<LayerKeyIter<'_>> {
         panic!("Not implemented")
     }
 
