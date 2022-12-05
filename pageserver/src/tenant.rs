@@ -481,7 +481,7 @@ impl Tenant {
             let timeline = UninitializedTimeline {
                 owning_tenant: self,
                 timeline_id,
-                raw_timeline: Some((Arc::new(dummy_timeline), TimelineUninitMark::dummy())),
+                raw_timeline: Some((dummy_timeline, TimelineUninitMark::dummy())),
             };
             // Do not start walreceiver here. We do need loaded layer map for reconcile_with_remote
             // But we shouldnt start walreceiver before we have all the data locally, because working walreceiver
@@ -511,7 +511,7 @@ impl Tenant {
                         )
                         })?;
                     broken_timeline.set_state(TimelineState::Broken);
-                    timelines_accessor.insert(timeline_id, Arc::new(broken_timeline));
+                    timelines_accessor.insert(timeline_id, broken_timeline);
                     Err(e)
                 }
             }
@@ -1596,7 +1596,7 @@ impl Tenant {
         new_metadata: TimelineMetadata,
         ancestor: Option<Arc<Timeline>>,
         remote_client: Option<RemoteTimelineClient>,
-    ) -> anyhow::Result<Timeline> {
+    ) -> anyhow::Result<Arc<Timeline>> {
         if let Some(ancestor_timeline_id) = new_metadata.ancestor_timeline() {
             anyhow::ensure!(
                 ancestor.is_some(),
@@ -2163,7 +2163,7 @@ impl Tenant {
                 Ok(UninitializedTimeline {
                     owning_tenant: self,
                     timeline_id: new_timeline_id,
-                    raw_timeline: Some((Arc::new(new_timeline), uninit_mark)),
+                    raw_timeline: Some((new_timeline, uninit_mark)),
                 })
             }
             Err(e) => {
@@ -2181,7 +2181,7 @@ impl Tenant {
         new_metadata: TimelineMetadata,
         ancestor: Option<Arc<Timeline>>,
         remote_client: Option<RemoteTimelineClient>,
-    ) -> anyhow::Result<Timeline> {
+    ) -> anyhow::Result<Arc<Timeline>> {
         let timeline_data = self
             .create_timeline_data(
                 new_timeline_id,
