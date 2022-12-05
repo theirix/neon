@@ -365,13 +365,9 @@ where
             zenith_signal.as_bytes(),
         )?;
 
-        let checkpoint_bytes = self
-            .timeline
-            .get_checkpoint(self.lsn)
+        let checkpoint_bytes = retry_get(|| self.timeline.get_checkpoint(self.lsn))
             .context("failed to get checkpoint bytes")?;
-        let pg_control_bytes = self
-            .timeline
-            .get_control_file(self.lsn)
+        let pg_control_bytes = retry_get(|| self.timeline.get_control_file(self.lsn))
             .context("failed get control bytes")?;
 
         let (pg_control_bytes, system_identifier) = postgres_ffi::generate_pg_control(
