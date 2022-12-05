@@ -91,6 +91,7 @@ impl PureLayer for InMemoryLayer {
         };
         self.start_lsn..end_lsn
     }
+
     fn is_incremental(&self) -> bool {
         // in-memory layer is always considered incremental.
         true
