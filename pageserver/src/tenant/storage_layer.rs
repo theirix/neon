@@ -137,11 +137,11 @@ pub trait Layer: Send + Sync {
     fn is_in_memory(&self) -> bool;
 
     /// Iterate through all keys and values stored in the layer
-    fn iter(&self) -> Box<dyn Iterator<Item = Result<(Key, Lsn, Value)>> + '_>;
+    fn iter(&self) -> Result<Box<dyn Iterator<Item = Result<(Key, Lsn, Value)>> + '_>>;
 
     /// Iterate through all keys stored in the layer. Returns key, lsn and value size
     /// It is used only for compaction and so is currently implemented only for DeltaLayer
-    fn key_iter(&self) -> Box<dyn Iterator<Item = (Key, Lsn, u64)> + '_> {
+    fn key_iter(&self) -> Result<Box<dyn Iterator<Item = (Key, Lsn, u64)> + '_>> {
         panic!("Not implemented")
     }
 

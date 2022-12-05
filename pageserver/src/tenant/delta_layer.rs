@@ -303,28 +303,21 @@ impl Layer for DeltaLayer {
         }
     }
 
-    fn iter<'a>(&'a self) -> Box<dyn Iterator<Item = anyhow::Result<(Key, Lsn, Value)>> + 'a> {
-        let inner = match self.load() {
-            Ok(inner) => inner,
-            Err(e) => panic!("Failed to load a delta layer: {e:?}"),
-        };
-
-        match DeltaValueIter::new(inner) {
+    fn iter<'a>(
+        &'a self,
+    ) -> Result<Box<dyn Iterator<Item = anyhow::Result<(Key, Lsn, Value)>> + 'a>> {
+        let inner = self.load().context("load delta layer")?;
+        Ok(match DeltaValueIter::new(inner) {
             Ok(iter) => Box::new(iter),
             Err(err) => Box::new(std::iter::once(Err(err))),
-        }
+        })
     }
 
-    fn key_iter<'a>(&'a self) -> Box<dyn Iterator<Item = (Key, Lsn, u64)> + 'a> {
-        let inner = match self.load() {
-            Ok(inner) => inner,
-            Err(e) => panic!("Failed to load a delta layer: {e:?}"),
-        };
-
-        match DeltaKeyIter::new(inner) {
-            Ok(iter) => Box::new(iter),
-            Err(e) => panic!("Layer index is corrupted: {e:?}"),
-        }
+    fn key_iter<'a>(&'a self) -> Result<Box<dyn Iterator<Item = (Key, Lsn, u64)> + 'a>> {
+        let inner = self.load()?;
+        Ok(Box::new(
+            DeltaKeyIter::new(inner).context("Layer index is corrupted")?,
+        ))
     }
 
     fn delete(&self) -> Result<()> {

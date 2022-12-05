@@ -180,7 +180,7 @@ impl Layer for ImageLayer {
         }
     }
 
-    fn iter(&self) -> Box<dyn Iterator<Item = Result<(Key, Lsn, Value)>>> {
+    fn iter(&self) -> Result<Box<dyn Iterator<Item = Result<(Key, Lsn, Value)>>>> {
         todo!();
     }
 
