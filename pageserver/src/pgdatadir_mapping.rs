@@ -438,7 +438,7 @@ impl Timeline {
 
         let mut total_size: u64 = 0;
         for (spcnode, dbnode) in dbdir.dbdirs.keys() {
-            for rel in self.list_rels(*spcnode, *dbnode, lsn)? {
+            for rel in crate::tenant::retry_get(|| self.list_rels(*spcnode, *dbnode, lsn)).await? {
                 let relsize_key = rel_size_to_key(rel);
                 let mut buf = self.get_download(relsize_key, lsn).await?;
                 let relsize = buf.get_u32_le();
