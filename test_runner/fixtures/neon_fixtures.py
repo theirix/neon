@@ -2937,6 +2937,15 @@ def assert_tenant_status(
     assert tenant_status["state"] == expected_status, tenant_status
 
 
+def tenant_exists(ps_http: PageserverHttpClient, tenant_id: TenantId):
+    tenants = ps_http.tenant_list()
+    matching = [t for t in tenants if TenantId(t["id"]) == tenant_id]
+    assert len(matching) < 2
+    if len(matching) == 0:
+        return None
+    return matching[0]
+
+
 def remote_consistent_lsn(
     pageserver_http_client: PageserverHttpClient, tenant: TenantId, timeline: TimelineId
 ) -> Lsn:
