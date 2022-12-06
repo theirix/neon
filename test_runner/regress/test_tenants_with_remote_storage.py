@@ -166,14 +166,6 @@ def test_tenants_attached_after_download(
         tenant_id, timeline_id, env.safekeepers, env.pageserver
     )
 
-    detail_before = client.timeline_detail(
-        tenant_id, timeline_id, include_non_incremental_physical_size=True
-    )
-    assert (
-        detail_before["current_physical_size_non_incremental"]
-        == detail_before["current_physical_size"]
-    )
-
     env.pageserver.stop()
 
     timeline_dir = Path(env.repo_dir) / "tenants" / str(tenant_id) / "timelines" / str(timeline_id)
@@ -207,12 +199,6 @@ def test_tenants_attached_after_download(
     assert restored_timeline["timeline_id"] == str(
         timeline_id
     ), f"Tenant {tenant_id} should have its old timeline {timeline_id} restored from the remote storage"
-
-    # Check that the physical size matches after re-downloading
-    detail_after = client.timeline_detail(
-        tenant_id, timeline_id, include_non_incremental_physical_size=True
-    )
-    assert detail_before["current_physical_size"] == detail_after["current_physical_size"]
 
 
 @pytest.mark.parametrize("remote_storage_kind", [RemoteStorageKind.LOCAL_FS])

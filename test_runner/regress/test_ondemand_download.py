@@ -13,6 +13,7 @@ from fixtures.neon_fixtures import (
     assert_tenant_status,
     available_remote_storages,
     wait_for_last_record_lsn,
+    wait_for_sk_commit_lsn_to_reach_remote_storage,
     wait_for_upload,
     wait_until,
 )
@@ -147,10 +148,10 @@ def test_ondemand_download_timetravel(
             "gc_period": "0s",
             "compaction_period": "0s",
             # small checkpoint distance to create more delta layer files
-            "checkpoint_distance": f"{10 * 1024 ** 2}",  # 10 MB
+            "checkpoint_distance": f"{1 * 1024 ** 2}",  # 1 MB
             "compaction_threshold": "1",
             "image_creation_threshold": "1",
-            "compaction_target_size": f"{10 * 1024 ** 2}",  # 10 MB
+            "compaction_target_size": f"{1 * 1024 ** 2}",  # 1 MB
         }
     )
     env.initial_tenant = tenant
@@ -164,11 +165,12 @@ def test_ondemand_download_timetravel(
 
     lsns = []
 
+    table_len = 10000
     with pg.cursor() as cur:
         cur.execute(
-            """
+            f"""
         CREATE TABLE testtab(id serial primary key, checkpoint_number int, data text);
-        INSERT INTO testtab (checkpoint_number, data) SELECT 0, 'data' FROM generate_series(1, 10000);
+        INSERT INTO testtab (checkpoint_number, data) SELECT 0, 'data' FROM generate_series(1, {table_len});
         """
         )
         current_lsn = Lsn(query_scalar(cur, "SELECT pg_current_wal_flush_lsn()"))
@@ -196,6 +198,18 @@ def test_ondemand_download_timetravel(
 
     ##### Stop the first pageserver instance, erase all its data
     env.postgres.stop_all()
+
+    wait_for_sk_commit_lsn_to_reach_remote_storage(
+        tenant_id, timeline_id, env.safekeepers, env.pageserver
+    )
+
+    def get_physical_size():
+        d = client.timeline_detail(tenant_id, timeline_id)
+        return d["current_physical_size"]
+
+    filled_size = get_physical_size()
+    log.info(f"filled_size={filled_size}")
+
     env.pageserver.stop()
 
     dir_to_clear = Path(env.repo_dir) / "tenants"
@@ -210,7 +224,7 @@ def test_ondemand_download_timetravel(
     wait_until(10, 0.2, lambda: assert_tenant_status(client, tenant_id, "Active"))
 
     num_layers_downloaded = [0]
-
+    physical_size = [get_physical_size()]
     for (checkpoint_number, lsn) in lsns:
         pg_old = env.postgres.create_start(
             branch_name="main", node_name=f"test_old_lsn_{checkpoint_number}", lsn=lsn
@@ -229,11 +243,12 @@ def test_ondemand_download_timetravel(
                     cur,
                     f"select count(*) from testtab where checkpoint_number={checkpoint_number}",
                 )
-                == 10000
+                == table_len
             )
 
         after_downloads = get_num_downloaded_layers(client, tenant_id, timeline_id)
         num_layers_downloaded.append(after_downloads)
+        log.info(f"num_layers_downloaded[-1]={num_layers_downloaded[-1]}")
 
         # Check that on each query, we need to download at least one more layer file. However in
         # practice, thanks to compaction and the fact that some requests need to download
@@ -245,3 +260,9 @@ def test_ondemand_download_timetravel(
         log.info(f"layers downloaded after checkpoint {checkpoint_number}: {after_downloads}")
         if len(num_layers_downloaded) > 4:
             assert after_downloads > num_layers_downloaded[len(num_layers_downloaded) - 4]
+
+        # Likewise, assert that the physical_size metric grows as layers are downloaded
+        physical_size.append(get_physical_size())
+        log.info(f"physical_size[-1]={physical_size[-1]}")
+        if len(physical_size) > 4:
+            assert physical_size[-1] > physical_size[len(physical_size) - 4]
