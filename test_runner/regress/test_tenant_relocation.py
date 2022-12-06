@@ -410,7 +410,7 @@ def test_tenant_relocation(
 
             # check that it shows that download is in progress
             tenant_status = new_pageserver_http.tenant_status(tenant_id=tenant_id)
-            assert tenant_status["state"] == "Attaching"
+            assert tenant_status["state"] in ["Attaching", "Active"]
 
             # wait until tenant is downloaded
             wait_until(
@@ -461,12 +461,15 @@ def test_tenant_relocation(
         # that all the data is there to be sure that old pageserver
         # is no longer involved, and if it is, we will see the error
         pageserver_http.tenant_detach(tenant_id)
-
+        assert_tenant_status(pageserver_http, tenant_id, "Stopping")
         # Wait a little, so that the detach operation has time to finish.
         wait_while(
             number_of_iterations=100,
             interval=1,
             func=lambda: assert_tenant_status(pageserver_http, tenant_id, "Stopping"),
+        )
+        env.pageserver.allowed_errors.append(
+            f".*Tenant {tenant_id} not found in the local state",
         )
 
         post_migration_check(pg_main, 500500, old_local_path_main)
