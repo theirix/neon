@@ -157,9 +157,6 @@ def test_remote_storage_backup_and_restore(
 
     # trigger temporary download files removal
     env.pageserver.stop()
-    dir_to_clear = Path(env.repo_dir) / "tenants"
-    shutil.rmtree(dir_to_clear)
-    os.mkdir(dir_to_clear)
     env.pageserver.start()
 
     # ensure that an initiated attach operation survives pageserver restart
