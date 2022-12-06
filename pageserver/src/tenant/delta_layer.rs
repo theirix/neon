@@ -212,7 +212,7 @@ impl Layer for DeltaLayer {
         self.lsn_range.clone()
     }
 
-    fn filename(&self) -> LayerFileName{
+    fn filename(&self) -> LayerFileName {
         self.layer_name().into()
     }
 

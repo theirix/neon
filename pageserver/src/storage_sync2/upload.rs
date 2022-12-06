@@ -7,7 +7,7 @@ use tokio::fs;
 
 use super::index::IndexPart;
 use crate::storage_sync::LayerFileMetadata;
-use crate::{config::PageServerConf, tenant::filename::LayerFileName};
+use crate::{config::PageServerConf} ;
 use remote_storage::GenericRemoteStorage;
 use utils::id::{TenantId, TimelineId};
 

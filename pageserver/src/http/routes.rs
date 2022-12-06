@@ -239,7 +239,7 @@ async fn timeline_list_handler(request: Request<Body>) -> Result<Response<Body>,
             .context("Failed to convert tenant timeline {timeline_id} into the local one: {e:?}")
             .map_err(ApiError::InternalServerError)?;
 
-                response_data.push(timeline_info);
+            response_data.push(timeline_info);
         }
         Ok(response_data)
     }

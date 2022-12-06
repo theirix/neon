@@ -26,7 +26,6 @@ use utils::{
 // while being able to use std::fmt::Write's methods
 use std::fmt::Write as _;
 use std::ops::Range;
-use std::path::PathBuf;
 use std::sync::RwLock;
 
 use super::filename::LayerFileName;

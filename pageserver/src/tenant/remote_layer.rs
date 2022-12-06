@@ -3,14 +3,13 @@
 //!
 use crate::config::PageServerConf;
 use crate::repository::{Key, Value};
-use crate::storage_sync::index::{LayerFileMetadata, RemotePath};
+use crate::storage_sync::index::LayerFileMetadata;
 use crate::tenant::delta_layer::DeltaLayer;
 use crate::tenant::filename::{DeltaFileName, ImageFileName};
 use crate::tenant::image_layer::ImageLayer;
 use crate::tenant::storage_layer::{Layer, ValueReconstructResult, ValueReconstructState};
 use anyhow::{bail, Result};
 use std::ops::Range;
-use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::Mutex;
 use tracing::trace;
@@ -142,9 +141,6 @@ impl RemoteLayer {
         fname: &ImageFileName,
         layer_metadata: &LayerFileMetadata,
     ) -> RemoteLayer {
-        let path =
-            RemotePath::strip_base_path(&PathBuf::from(""), &PathBuf::from(fname.to_string()))
-                .unwrap();
         RemoteLayer {
             tenantid,
             timelineid,
@@ -164,9 +160,6 @@ impl RemoteLayer {
         fname: &DeltaFileName,
         layer_metadata: &LayerFileMetadata,
     ) -> RemoteLayer {
-        let path =
-            RemotePath::strip_base_path(&PathBuf::from(""), &PathBuf::from(fname.to_string()))
-                .unwrap();
         RemoteLayer {
             tenantid,
             timelineid,

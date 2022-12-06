@@ -178,6 +178,8 @@ pub enum LayerFileName {
     Image(ImageFileName),
     Delta(DeltaFileName),
     Inmemory(String),
+    #[cfg(test)]
+    Test(String),
 }
 
 impl LayerFileName {
@@ -186,6 +188,8 @@ impl LayerFileName {
             LayerFileName::Image(fname) => format!("{fname}"),
             LayerFileName::Delta(fname) => format!("{fname}"),
             LayerFileName::Inmemory(fname) => format!("{fname}"),
+            #[cfg(test)]
+            LayerFileName::Test(fname) => format!("{fname}"),
         }
     }
 }
@@ -205,13 +209,21 @@ impl<'a> TryFrom<&'a str> for LayerFileName {
     type Error = String;
 
     fn try_from(value: &'a str) -> Result<Self, Self::Error> {
+        #[cfg(test)]
+        if let Some(value) = value.strip_prefix("LayerFileName::Test=") {
+            return Ok(LayerFileName::Test(value.to_owned()));
+        }
         let delta = DeltaFileName::parse_str(value.as_ref());
         let image = ImageFileName::parse_str(value.as_ref());
         let ok = match (delta, image) {
-            (None, None) => return Err(format!("neither delta nor image layer file name: {value:?}")),
+            (None, None) => {
+                return Err(format!(
+                    "neither delta nor image layer file name: {value:?}"
+                ))
+            }
             (Some(delta), None) => LayerFileName::Delta(delta),
             (None, Some(image)) => LayerFileName::Image(image),
-            (Some(a), Some(b)) => unreachable!(),
+            (Some(_), Some(_)) => unreachable!(),
         };
         Ok(ok)
     }
@@ -228,7 +240,13 @@ impl serde::Serialize for LayerFileName {
     where
         S: serde::Serializer,
     {
-        serializer.serialize_str(&self.file_name())
+        match self {
+            LayerFileName::Image(fname) => serializer.serialize_str(&format!("{}", fname)),
+            LayerFileName::Delta(fname) => serializer.serialize_str(&format!("{}", fname)),
+            LayerFileName::Inmemory(_) => unreachable!(),
+            #[cfg(test)]
+            LayerFileName::Test(t) => serializer.serialize_str(&format!("LayerFileName::Test={t}")),
+        }
     }
 }
 

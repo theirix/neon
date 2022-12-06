@@ -11,7 +11,7 @@ use anyhow::{Context, Ok};
 use serde::{Deserialize, Serialize};
 use serde_with::{serde_as, DisplayFromStr};
 
-use crate::tenant::{metadata::TimelineMetadata, filename::LayerFileName};
+use crate::tenant::{filename::LayerFileName, metadata::TimelineMetadata};
 
 use utils::lsn::Lsn;
 

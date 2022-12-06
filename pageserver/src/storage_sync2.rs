@@ -197,7 +197,6 @@ pub use download::{is_temp_download_file, list_remote_timelines};
 use std::collections::{HashMap, VecDeque};
 use std::fmt::Debug;
 use std::ops::DerefMut;
-use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 
@@ -218,7 +217,7 @@ use crate::metrics::REMOTE_UPLOAD_QUEUE_UNFINISHED_TASKS;
 use crate::tenant::filename::LayerFileName;
 use crate::{
     config::PageServerConf,
-    storage_sync::index::{LayerFileMetadata, RemotePath},
+    storage_sync::index::LayerFileMetadata,
     task_mgr,
     task_mgr::TaskKind,
     task_mgr::BACKGROUND_RUNTIME,
@@ -439,7 +438,12 @@ impl std::fmt::Display for UploadOp {
     fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
         match self {
             UploadOp::UploadLayer(path, metadata) => {
-                write!(f, "UploadLayer({}, size={:?})", path.display(), metadata.file_size())
+                write!(
+                    f,
+                    "UploadLayer({}, size={:?})",
+                    path.display(),
+                    metadata.file_size()
+                )
             }
             UploadOp::UploadMetadata(_, lsn) => write!(f, "UploadMetadata(lsn: {})", lsn),
             UploadOp::Delete(_, path) => write!(f, "Delete({})", path.display()),
@@ -1064,7 +1068,7 @@ mod tests {
     use super::*;
     use crate::tenant::harness::{TenantHarness, TIMELINE_ID};
     use remote_storage::{RemoteStorageConfig, RemoteStorageKind};
-    use std::collections::HashSet;
+    use std::{collections::HashSet, path::Path};
     use utils::lsn::Lsn;
 
     pub(super) fn dummy_contents(name: &str) -> Vec<u8> {
@@ -1088,12 +1092,8 @@ mod tests {
         TimelineMetadata::from_bytes(&metadata.to_bytes().unwrap()).unwrap()
     }
 
-    fn assert_file_list(a: &HashSet<RemotePath>, b: &[&str]) {
-        let xx = PathBuf::from("");
-        let mut avec: Vec<String> = a
-            .iter()
-            .map(|x| x.to_local_path(&xx).to_string_lossy().into())
-            .collect();
+    fn assert_file_list(a: &HashSet<LayerFileName>, b: &[&str]) {
+        let mut avec: Vec<String> = a.iter().map(|x| x.file_name()).collect();
         avec.sort();
 
         let mut bvec = b.to_owned();
@@ -1118,7 +1118,6 @@ mod tests {
     }
 
     // Test scheduling
-    #[cfg(disabled)]
     #[test]
     fn upload_scheduling() -> anyhow::Result<()> {
         let harness = TenantHarness::create("upload_scheduling")?;
@@ -1190,11 +1189,11 @@ mod tests {
         std::fs::write(timeline_path.join("bar"), &content_bar)?;
 
         client.schedule_layer_file_upload(
-            &timeline_path.join("foo"),
+            &LayerFileName::Test("foo".to_owned()),
             &LayerFileMetadata::new(content_foo.len() as u64),
         )?;
         client.schedule_layer_file_upload(
-            &timeline_path.join("bar"),
+            &LayerFileName::Test("bar".to_owned()),
             &LayerFileMetadata::new(content_bar.len() as u64),
         )?;
 
@@ -1236,10 +1235,10 @@ mod tests {
         let content_baz = dummy_contents("baz");
         std::fs::write(timeline_path.join("baz"), &content_baz)?;
         client.schedule_layer_file_upload(
-            &timeline_path.join("baz"),
+            &LayerFileName::Test("baz".to_owned()),
             &LayerFileMetadata::new(content_baz.len() as u64),
         )?;
-        client.schedule_layer_file_deletion(&[timeline_path.join("foo")])?;
+        client.schedule_layer_file_deletion(&[LayerFileName::Test("foo".to_owned())])?;
         {
             let mut guard = client.upload_queue.lock().unwrap();
             let upload_queue = guard.initialized_mut().unwrap();

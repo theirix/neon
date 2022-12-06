@@ -20,7 +20,7 @@ use std::sync::atomic::{AtomicBool, AtomicI64, Ordering as AtomicOrdering};
 use std::sync::{Arc, Mutex, MutexGuard, RwLock, Weak};
 use std::time::{Duration, Instant, SystemTime};
 
-use crate::storage_sync::index::{IndexPart, RemotePath};
+use crate::storage_sync::index::{IndexPart};
 use crate::storage_sync::RemoteTimelineClient;
 use crate::tenant::remote_layer::RemoteLayer;
 use crate::tenant::{
@@ -1139,7 +1139,9 @@ impl Timeline {
                         .unwrap()
                         .insert_historic(Arc::new(remote_layer));
                 }
-                LayerFileName::Inmemory(x) => unreachable!(),
+                LayerFileName::Inmemory(_) => unreachable!(),
+                #[cfg(test)]
+                LayerFileName::Test(_) => unreachable!(),
             }
         }
 
