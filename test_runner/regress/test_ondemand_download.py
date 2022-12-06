@@ -3,7 +3,6 @@
 
 import os
 import shutil
-import time
 from pathlib import Path
 
 import pytest
@@ -11,9 +10,11 @@ from fixtures.log_helper import log
 from fixtures.neon_fixtures import (
     NeonEnvBuilder,
     RemoteStorageKind,
+    assert_tenant_status,
     available_remote_storages,
     wait_for_last_record_lsn,
     wait_for_upload,
+    wait_until,
 )
 from fixtures.types import Lsn
 from fixtures.utils import query_scalar
@@ -140,9 +141,11 @@ def test_ondemand_download_timetravel(
     # Override defaults, to create more layers
     tenant, _ = env.neon_cli.create_tenant(
         conf={
-            # disable background GC
-            "gc_period": "10 m",
-            "gc_horizon": f"{10 * 1024 ** 3}",  # 10 GB
+            # Disable background GC & compaction
+            # We don't want GC, that would break the assertion about num downloads.
+            # We don't want background compaction, we force a compaction every time we do explicit checkpoint.
+            "gc_period": "0s",
+            "compaction_period": "0s",
             # small checkpoint distance to create more delta layer files
             "checkpoint_distance": f"{10 * 1024 ** 2}",  # 10 MB
             "compaction_threshold": "1",
@@ -169,11 +172,11 @@ def test_ondemand_download_timetravel(
         """
         )
         current_lsn = Lsn(query_scalar(cur, "SELECT pg_current_wal_flush_lsn()"))
+    # wait until pageserver receives that data
+    wait_for_last_record_lsn(client, tenant_id, timeline_id, current_lsn)
+    # run checkpoint manually to be sure that data landed in remote storage
+    client.timeline_checkpoint(tenant_id, timeline_id)
     lsns.append((0, current_lsn))
-
-    # Slow down the upload. If the compaction logic deletes a file that hasn't been
-    # uploaded yet, this makes that bug show up.
-    client.configure_failpoints(("before-upload-layer", "sleep(1000)"))
 
     for checkpoint_number in range(1, 20):
         with pg.cursor() as cur:
@@ -204,12 +207,7 @@ def test_ondemand_download_timetravel(
 
     client.tenant_attach(tenant_id)
 
-    # Wait for the Attach to finish
-    time.sleep(1)
-
-    # FIXME: work around bug https://github.com/neondatabase/neon/issues/2305.
-    # Once that's fixed, this reverse() call can be removed.
-    lsns.reverse()
+    wait_until(10, 0.2, lambda: assert_tenant_status(client, tenant_id, "Active"))
 
     num_layers_downloaded = [0]
 
@@ -226,6 +224,14 @@ def test_ondemand_download_timetravel(
                 )
                 == 0
             )
+            assert (
+                query_scalar(
+                    cur,
+                    f"select count(*) from testtab where checkpoint_number={checkpoint_number}",
+                )
+                == 10000
+            )
+
         after_downloads = get_num_downloaded_layers(client, tenant_id, timeline_id)
         num_layers_downloaded.append(after_downloads)
 
