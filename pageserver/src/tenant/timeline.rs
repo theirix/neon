@@ -1111,7 +1111,6 @@ impl Timeline {
                         &remote_layer_metadata,
                     );
 
-                    // FIXME: when to update physical size?
                     self.layers
                         .write()
                         .unwrap()
@@ -1138,7 +1137,6 @@ impl Timeline {
                         &remote_layer_metadata,
                     );
 
-                    // FIXME: when to update physical size?
                     self.layers
                         .write()
                         .unwrap()
@@ -2807,7 +2805,11 @@ impl Timeline {
                                 &remote_layer.file_name,
                                 &remote_layer.layer_metadata,
                             )
-                            .await;
+                            .await; // FIXME(christian) error handling???
+
+                        if let Ok(size) = result {
+                            self.metrics.current_physical_size_gauge.add(size);
+                        }
 
                         // Download complete. Replace the RemoteLayer with the corresponding
                         // Delta- or ImageLayer in the layer map.
