@@ -10,12 +10,12 @@ use tracing::debug;
 
 use crate::config::PageServerConf;
 use crate::storage_sync::index::LayerFileMetadata;
+use crate::tenant::filename::LayerFileName;
 use remote_storage::{DownloadError, GenericRemoteStorage};
 use utils::crashsafe::path_with_suffix_extension;
 use utils::id::{TenantId, TimelineId};
 
 use super::index::IndexPart;
-use super::RemotePath;
 
 async fn fsync_path(path: impl AsRef<std::path::Path>) -> Result<(), std::io::Error> {
     fs::File::open(path).await?.sync_all().await
@@ -31,12 +31,12 @@ pub async fn download_layer_file<'a>(
     storage: &'a GenericRemoteStorage,
     tenant_id: TenantId,
     timeline_id: TimelineId,
-    path: &'a RemotePath,
+    layer_file_name: &'a LayerFileName,
     layer_metadata: &'a LayerFileMetadata,
 ) -> anyhow::Result<u64> {
     let timeline_path = conf.timeline_path(&timeline_id, &tenant_id);
 
-    let local_path = path.to_local_path(&timeline_path);
+    let local_path = timeline_path.join(layer_file_name.file_name());
 
     let layer_storage_path = storage.remote_object_id(&local_path).with_context(|| {
         format!(

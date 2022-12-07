@@ -52,6 +52,8 @@ use utils::{
     lsn::Lsn,
 };
 
+use super::filename::LayerFileName;
+
 ///
 /// Header stored in the beginning of the file
 ///
@@ -210,12 +212,12 @@ impl Layer for DeltaLayer {
         self.lsn_range.clone()
     }
 
-    fn filename(&self) -> PathBuf {
-        PathBuf::from(self.layer_name().to_string())
+    fn filename(&self) -> LayerFileName {
+        self.layer_name().into()
     }
 
-    fn local_path(&self) -> Option<PathBuf> {
-        Some(self.path())
+    fn local_path(&self) -> Option<LayerFileName> {
+        Some(self.filename())
     }
 
     fn get_value_reconstruct_data(
@@ -504,8 +506,8 @@ impl DeltaLayer {
                 }
             }
             PathOrConf::Path(path) => {
-                let actual_filename = Path::new(path.file_name().unwrap());
-                let expected_filename = self.filename();
+                let actual_filename = path.file_name().unwrap().to_str().unwrap().to_owned();
+                let expected_filename = self.filename().file_name();
 
                 if actual_filename != expected_filename {
                     println!(
