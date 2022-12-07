@@ -1033,7 +1033,7 @@ impl Timeline {
         let mut local_only_layers = local_layers;
         let timeline_dir = self.conf.timeline_path(&self.timeline_id, &self.tenant_id);
         for remote_layer_name in &index_part.timeline_layers {
-            local_only_layers.remove(&remote_layer_name);
+            local_only_layers.remove(remote_layer_name);
 
             let remote_layer_metadata = index_part
                 .layer_metadata
@@ -1089,7 +1089,7 @@ impl Timeline {
                     let remote_layer = RemoteLayer::new_img(
                         self.tenant_id,
                         self.timeline_id,
-                        &imgfilename,
+                        imgfilename,
                         &remote_layer_metadata,
                     );
 
@@ -1115,7 +1115,7 @@ impl Timeline {
                     let remote_layer = RemoteLayer::new_delta(
                         self.tenant_id,
                         self.timeline_id,
-                        &deltafilename,
+                        deltafilename,
                         &remote_layer_metadata,
                     );
 
