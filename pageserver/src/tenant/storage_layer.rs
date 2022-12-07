@@ -7,7 +7,6 @@ use crate::walrecord::NeonWalRecord;
 use anyhow::Result;
 use bytes::Bytes;
 use std::ops::Range;
-use std::path::PathBuf;
 use std::sync::Arc;
 
 use utils::{
@@ -17,6 +16,7 @@ use utils::{
 
 use super::layer_map::LayerMapLayer;
 
+use super::filename::LayerFileName;
 pub fn range_overlaps<T>(a: &Range<T>, b: &Range<T>) -> bool
 where
     T: PartialOrd<T>,
@@ -95,10 +95,10 @@ pub trait Layer: Send + Sync + LayerMapLayer {
     /// Filename used to store this layer on disk. (Even in-memory layers
     /// implement this, to print a handy unique identifier for the layer for
     /// log messages, even though they're never not on disk.)
-    fn filename(&self) -> PathBuf;
+    fn filename(&self) -> LayerFileName;
 
     /// If a layer has a corresponding file on a local filesystem, return its absolute path.
-    fn local_path(&self) -> Option<PathBuf>;
+    fn local_path(&self) -> Option<LayerFileName>;
 
     /// Returns true for layers that are represented in memory.
     fn is_in_memory(&self) -> bool;
