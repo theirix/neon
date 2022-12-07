@@ -7,6 +7,7 @@ use crate::walrecord::NeonWalRecord;
 use anyhow::Result;
 use bytes::Bytes;
 use std::ops::Range;
+use std::sync::Arc;
 
 use utils::{
     id::{TenantId, TimelineId},
@@ -14,6 +15,8 @@ use utils::{
 };
 
 use super::filename::LayerFileName;
+use super::remote_layer::RemoteLayer;
+
 pub fn range_overlaps<T>(a: &Range<T>, b: &Range<T>) -> bool
 where
     T: PartialOrd<T>,
@@ -150,4 +153,20 @@ pub trait Layer: Send + Sync {
 
     /// Dump summary of the contents of the layer to stdout
     fn dump(&self, verbose: bool) -> Result<()>;
+
+    fn downcast_remote_layer(self: Arc<Self>) -> Option<std::sync::Arc<RemoteLayer>> {
+        None
+    }
+
+    fn is_remote_layer(&self) -> bool {
+        false
+    }
+}
+
+pub fn downcast_remote_layer(layer: &Arc<dyn Layer>) -> Option<std::sync::Arc<RemoteLayer>> {
+    if layer.is_remote_layer() {
+        Arc::clone(layer).downcast_remote_layer()
+    } else {
+        None
+    }
 }
