@@ -177,7 +177,6 @@ impl fmt::Display for ImageFileName {
 pub enum LayerFileName {
     Image(ImageFileName),
     Delta(DeltaFileName),
-    Inmemory(String),
     #[cfg(test)]
     Test(String),
 }
@@ -187,7 +186,6 @@ impl LayerFileName {
         match self {
             LayerFileName::Image(fname) => format!("{fname}"),
             LayerFileName::Delta(fname) => format!("{fname}"),
-            LayerFileName::Inmemory(fname) => format!("{fname}"),
             #[cfg(test)]
             LayerFileName::Test(fname) => format!("{fname}"),
         }
@@ -243,7 +241,6 @@ impl serde::Serialize for LayerFileName {
         match self {
             LayerFileName::Image(fname) => serializer.serialize_str(&format!("{}", fname)),
             LayerFileName::Delta(fname) => serializer.serialize_str(&format!("{}", fname)),
-            LayerFileName::Inmemory(_) => unreachable!(),
             #[cfg(test)]
             LayerFileName::Test(t) => serializer.serialize_str(&format!("LayerFileName::Test={t}")),
         }

@@ -1133,7 +1133,6 @@ impl Timeline {
 
                     self.metrics.current_physical_size_gauge.add(sz);
                 }
-                LayerFileName::Inmemory(_) => unreachable!(),
                 #[cfg(test)]
                 LayerFileName::Test(_) => unreachable!(),
             }
