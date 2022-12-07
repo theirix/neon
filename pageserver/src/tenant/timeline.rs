@@ -1016,11 +1016,9 @@ impl Timeline {
         Ok(())
     }
 
-    // FIXME rename to create_remote_layers
-    async fn download_missing(
+    async fn create_remote_layers(
         &self,
         index_part: &IndexPart,
-        remote_client: &RemoteTimelineClient,
         local_layers: HashMap<LayerFileName, Arc<dyn Layer>>,
         up_to_date_disk_consistent_lsn: Lsn,
     ) -> anyhow::Result<HashMap<LayerFileName, Arc<dyn Layer>>> {
@@ -1179,9 +1177,10 @@ impl Timeline {
                     index_part.timeline_layers.len()
                 );
                 remote_client.init_upload_queue(index_part)?;
-
-                self.download_missing(index_part, remote_client, local_layers, disk_consistent_lsn)
-                    .await?
+                let local_only_filenames = self
+                    .create_remote_layers(index_part, local_layers, disk_consistent_lsn)
+                    .await?;
+                local_only_filenames
             }
             None => {
                 info!("initializing upload queue as empty");
