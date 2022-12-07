@@ -1016,11 +1016,9 @@ impl Timeline {
         Ok(())
     }
 
-    // FIXME rename to create_remote_layers
-    async fn download_missing(
+    async fn create_remote_layers(
         &self,
         index_part: &IndexPart,
-        remote_client: &RemoteTimelineClient,
         mut local_filenames: HashSet<LayerFileName>,
         up_to_date_disk_consistent_lsn: Lsn,
     ) -> anyhow::Result<HashSet<LayerFileName>> {
@@ -1195,12 +1193,7 @@ impl Timeline {
                 );
                 remote_client.init_upload_queue(index_part)?;
                 let local_only_filenames = self
-                    .download_missing(
-                        index_part,
-                        remote_client,
-                        local_filenames,
-                        disk_consistent_lsn,
-                    )
+                    .create_remote_layers(index_part, local_filenames, disk_consistent_lsn)
                     .await?;
                 local_only_filenames
             }
