@@ -21,7 +21,7 @@
 //! actual page images are stored in the "values" part.
 use crate::config::PageServerConf;
 use crate::page_cache::PAGE_SZ;
-use crate::repository::{Key, Value, KEY_SIZE};
+use crate::repository::{Key, KEY_SIZE};
 use crate::tenant::blob_io::{BlobCursor, BlobWriter, WriteBlobWriter};
 use crate::tenant::block_io::{BlockBuf, BlockReader, FileBlockReader};
 use crate::tenant::disk_btree::{DiskBtreeBuilder, DiskBtreeReader, VisitDirection};
@@ -47,6 +47,8 @@ use utils::{
     id::{TenantId, TimelineId},
     lsn::Lsn,
 };
+
+use super::storage_layer::LayerIter;
 
 ///
 /// Header stored in the beginning of the file
@@ -180,7 +182,7 @@ impl Layer for ImageLayer {
         }
     }
 
-    fn iter(&self) -> Box<dyn Iterator<Item = Result<(Key, Lsn, Value)>>> {
+    fn iter(&self) -> LayerIter<'_> {
         todo!();
     }
 

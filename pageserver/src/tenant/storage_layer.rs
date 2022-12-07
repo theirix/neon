@@ -69,6 +69,12 @@ pub enum ValueReconstructResult {
     Missing,
 }
 
+/// Returned by [`Layer::iter`]
+pub type LayerIter<'i> = Box<dyn Iterator<Item = Result<(Key, Lsn, Value)>> + 'i>;
+
+/// Returned by [`Layer::key_iter`]
+pub type LayerKeyIter<'i> = Box<dyn Iterator<Item = (Key, Lsn, u64)> + 'i>;
+
 /// A Layer contains all data in a "rectangle" consisting of a range of keys and
 /// range of LSNs.
 ///
@@ -137,11 +143,11 @@ pub trait Layer: Send + Sync {
     fn is_in_memory(&self) -> bool;
 
     /// Iterate through all keys and values stored in the layer
-    fn iter(&self) -> Box<dyn Iterator<Item = Result<(Key, Lsn, Value)>> + '_>;
+    fn iter(&self) -> LayerIter<'_>;
 
     /// Iterate through all keys stored in the layer. Returns key, lsn and value size
     /// It is used only for compaction and so is currently implemented only for DeltaLayer
-    fn key_iter(&self) -> Box<dyn Iterator<Item = (Key, Lsn, u64)> + '_> {
+    fn key_iter(&self) -> LayerKeyIter<'_> {
         panic!("Not implemented")
     }
 

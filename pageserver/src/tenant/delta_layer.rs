@@ -52,6 +52,8 @@ use utils::{
     lsn::Lsn,
 };
 
+use super::storage_layer::{LayerIter, LayerKeyIter};
+
 ///
 /// Header stored in the beginning of the file
 ///
@@ -303,7 +305,7 @@ impl Layer for DeltaLayer {
         }
     }
 
-    fn iter<'a>(&'a self) -> Box<dyn Iterator<Item = anyhow::Result<(Key, Lsn, Value)>> + 'a> {
+    fn iter(&self) -> LayerIter<'_> {
         let inner = match self.load() {
             Ok(inner) => inner,
             Err(e) => panic!("Failed to load a delta layer: {e:?}"),
@@ -315,7 +317,7 @@ impl Layer for DeltaLayer {
         }
     }
 
-    fn key_iter<'a>(&'a self) -> Box<dyn Iterator<Item = (Key, Lsn, u64)> + 'a> {
+    fn key_iter(&self) -> LayerKeyIter<'_> {
         let inner = match self.load() {
             Ok(inner) => inner,
             Err(e) => panic!("Failed to load a delta layer: {e:?}"),
