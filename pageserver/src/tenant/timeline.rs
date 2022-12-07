@@ -62,6 +62,8 @@ use crate::ZERO_PAGE;
 use crate::{is_temporary, task_mgr};
 use crate::{page_cache, storage_sync::index::LayerFileMetadata};
 
+use super::layer_map::LayerMapLayer;
+
 #[derive(Debug, PartialEq, Eq, Clone, Copy)]
 enum FlushLoopState {
     NotStarted,
@@ -78,7 +80,7 @@ pub struct Timeline {
 
     pub pg_version: u32,
 
-    pub layers: RwLock<LayerMap>,
+    pub layers: RwLock<LayerMap<dyn Layer>>,
 
     last_freeze_at: AtomicLsn,
     // Atomic would be more appropriate here.
@@ -1338,7 +1340,8 @@ impl Timeline {
 
         // For debugging purposes, collect the path of layers that we traversed
         // through. It's included in the error message if we fail to find the key.
-        let mut traversal_path: Vec<(ValueReconstructResult, Lsn, Arc<dyn Layer>)> = Vec::new();
+        let mut traversal_path: Vec<(ValueReconstructResult, Lsn, Arc<dyn LayerMapLayer>)> =
+            Vec::new();
 
         let cached_lsn = if let Some((cached_lsn, _)) = &reconstruct_state.img {
             *cached_lsn
@@ -1450,7 +1453,7 @@ impl Timeline {
                     reconstruct_state,
                 )?;
                 cont_lsn = lsn_floor;
-                traversal_path.push((result, cont_lsn, layer));
+                traversal_path.push((result, cont_lsn, layer.as_arc_dyn_layer_map_layer()));
             } else if timeline.ancestor_timeline.is_some() {
                 // Nothing on this timeline. Traverse to parent
                 result = ValueReconstructResult::Continue;
@@ -1665,7 +1668,7 @@ impl Timeline {
     }
 
     /// Flush one frozen in-memory layer to disk, as a new delta layer.
-    #[instrument(skip(self, frozen_layer), fields(tenant_id=%self.tenant_id, timeline_id=%self.timeline_id, layer=%frozen_layer.filename().display()))]
+    #[instrument(skip(self, frozen_layer), fields(tenant_id=%self.tenant_id, timeline_id=%self.timeline_id, layer=%frozen_layer.debug_short()))]
     async fn flush_frozen_layer(&self, frozen_layer: Arc<InMemoryLayer>) -> anyhow::Result<()> {
         // As a special case, when we have just imported an image into the repository,
         // instead of writing out a L0 delta layer, we directly write out image layer
@@ -2275,7 +2278,8 @@ impl Timeline {
             self.metrics.current_physical_size_gauge.add(metadata.len());
 
             new_layer_paths.insert(new_delta_path, LayerFileMetadata::new(metadata.len()));
-            layers.insert_historic(Arc::new(l));
+            let x: Arc<dyn Layer + 'static> = Arc::new(l);
+            layers.insert_historic(x);
         }
 
         // Now that we have reshuffled the data to set of new delta layers, we can
@@ -2685,7 +2689,7 @@ impl Timeline {
 /// to an error, as anyhow context information.
 fn layer_traversal_error(
     msg: String,
-    path: Vec<(ValueReconstructResult, Lsn, Arc<dyn Layer>)>,
+    path: Vec<(ValueReconstructResult, Lsn, Arc<dyn LayerMapLayer>)>,
 ) -> anyhow::Result<()> {
     // We want the original 'msg' to be the outermost context. The outermost context
     // is the most high-level information, which also gets propagated to the client.
@@ -2696,7 +2700,7 @@ fn layer_traversal_error(
                 "layer traversal: result {:?}, cont_lsn {}, layer: {}",
                 r,
                 c,
-                l.filename().display()
+                l.debug_short(),
             )
         })
         .chain(std::iter::once(msg));

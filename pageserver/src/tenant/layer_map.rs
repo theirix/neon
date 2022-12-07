@@ -13,7 +13,6 @@
 use crate::metrics::NUM_ONDISK_LAYERS;
 use crate::repository::Key;
 use crate::tenant::inmemory_layer::InMemoryLayer;
-use crate::tenant::storage_layer::Layer;
 use crate::tenant::storage_layer::{range_eq, range_overlaps};
 use amplify_num::i256;
 use anyhow::Result;
@@ -28,11 +27,12 @@ use std::sync::Arc;
 use tracing::*;
 use utils::lsn::Lsn;
 
+use super::storage_layer::{ValueReconstructResult, ValueReconstructState};
+
 ///
 /// LayerMap tracks what layers exist on a timeline.
 ///
-#[derive(Default)]
-pub struct LayerMap {
+pub struct LayerMap<PersistentLayerT: ?Sized> {
     //
     // 'open_layer' holds the current InMemoryLayer that is accepting new
     // records. If it is None, 'next_open_layer_at' will be set instead, indicating
@@ -53,15 +53,70 @@ pub struct LayerMap {
     pub frozen_layers: VecDeque<Arc<InMemoryLayer>>,
 
     /// All the historic layers are kept here
-    historic_layers: RTree<LayerRTreeObject>,
+    historic_layers: RTree<LayerRTreeObject<PersistentLayerT>>,
 
     /// L0 layers have key range Key::MIN..Key::MAX, and locating them using R-Tree search is very inefficient.
     /// So L0 layers are held in l0_delta_layers vector, in addition to the R-tree.
-    l0_delta_layers: Vec<Arc<dyn Layer>>,
+    l0_delta_layers: Vec<Arc<PersistentLayerT>>,
 }
 
-struct LayerRTreeObject {
-    layer: Arc<dyn Layer>,
+impl<T: ?Sized> Default for LayerMap<T> {
+    fn default() -> Self {
+        Self {
+            open_layer: Default::default(),
+            next_open_layer_at: Default::default(),
+            frozen_layers: Default::default(),
+            historic_layers: Default::default(),
+            l0_delta_layers: Default::default(),
+        }
+    }
+}
+
+pub trait LayerMapLayer: Send + Sync {
+    /// Range of keys that this layer covers
+    fn get_key_range(&self) -> Range<Key>;
+
+    /// Inclusive start bound of the LSN range that this layer holds
+    /// Exclusive end bound of the LSN range that this layer holds.
+    ///
+    /// - For an open in-memory layer, this is MAX_LSN.
+    /// - For a frozen in-memory layer or a delta layer, this is a valid end bound.
+    /// - An image layer represents snapshot at one LSN, so end_lsn is always the snapshot LSN + 1
+    fn get_lsn_range(&self) -> Range<Lsn>;
+
+    /// Does this layer only contain some data for the key-range (incremental),
+    /// or does it contain a version of every page? This is important to know
+    /// for garbage collecting old layers: an incremental layer depends on
+    /// the previous non-incremental layer.
+    fn is_incremental(&self) -> bool;
+
+    ///
+    /// Return data needed to reconstruct given page at LSN.
+    ///
+    /// It is up to the caller to collect more data from previous layer and
+    /// perform WAL redo, if necessary.
+    ///
+    /// See PageReconstructResult for possible return values. The collected data
+    /// is appended to reconstruct_data; the caller should pass an empty struct
+    /// on first call, or a struct with a cached older image of the page if one
+    /// is available. If this returns PageReconstructResult::Continue, look up
+    /// the predecessor layer and call again with the same 'reconstruct_data' to
+    /// collect more data.
+    fn get_value_reconstruct_data(
+        &self,
+        key: Key,
+        lsn_range: Range<Lsn>,
+        reconstruct_data: &mut ValueReconstructState,
+    ) -> Result<ValueReconstructResult>;
+
+    fn debug_short(&self) -> String;
+
+    /// Dump summary of the contents of the layer to stdout
+    fn dump(&self, verbose: bool) -> Result<()>;
+}
+
+struct LayerRTreeObject<PersistentLayerT: ?Sized> {
+    layer: Arc<PersistentLayerT>,
 
     envelope: AABB<[IntKey; 2]>,
 }
@@ -185,7 +240,7 @@ impl Num for IntKey {
     }
 }
 
-impl PartialEq for LayerRTreeObject {
+impl<T: ?Sized> PartialEq for LayerRTreeObject<T> {
     fn eq(&self, other: &Self) -> bool {
         // FIXME: ptr_eq might fail to return true for 'dyn'
         // references.  Clippy complains about this. In practice it
@@ -196,15 +251,21 @@ impl PartialEq for LayerRTreeObject {
     }
 }
 
-impl RTreeObject for LayerRTreeObject {
+impl<PersistentLayerT> RTreeObject for LayerRTreeObject<PersistentLayerT>
+where
+    PersistentLayerT: ?Sized,
+{
     type Envelope = AABB<[IntKey; 2]>;
     fn envelope(&self) -> Self::Envelope {
         self.envelope
     }
 }
 
-impl LayerRTreeObject {
-    fn new(layer: Arc<dyn Layer>) -> Self {
+impl<PersistentLayerT> LayerRTreeObject<PersistentLayerT>
+where
+    PersistentLayerT: ?Sized + LayerMapLayer,
+{
+    fn new(layer: Arc<PersistentLayerT>) -> Self {
         let key_range = layer.get_key_range();
         let lsn_range = layer.get_lsn_range();
 
@@ -223,12 +284,15 @@ impl LayerRTreeObject {
 }
 
 /// Return value of LayerMap::search
-pub struct SearchResult {
-    pub layer: Arc<dyn Layer>,
+pub struct SearchResult<PersistentLayerT: ?Sized> {
+    pub layer: Arc<PersistentLayerT>,
     pub lsn_floor: Lsn,
 }
 
-impl LayerMap {
+impl<PersistentLayerT> LayerMap<PersistentLayerT>
+where
+    PersistentLayerT: ?Sized + Send + Sync + LayerMapLayer,
+{
     ///
     /// Find the latest layer that covers the given 'key', with lsn <
     /// 'end_lsn'.
@@ -240,10 +304,10 @@ impl LayerMap {
     /// contain the version, even if it's missing from the returned
     /// layer.
     ///
-    pub fn search(&self, key: Key, end_lsn: Lsn) -> Result<Option<SearchResult>> {
+    pub fn search(&self, key: Key, end_lsn: Lsn) -> Result<Option<SearchResult<PersistentLayerT>>> {
         // linear search
         // Find the latest image layer that covers the given key
-        let mut latest_img: Option<Arc<dyn Layer>> = None;
+        let mut latest_img: Option<Arc<PersistentLayerT>> = None;
         let mut latest_img_lsn: Option<Lsn> = None;
         let envelope = AABB::from_corners(
             [IntKey::from(key.to_i128()), IntKey::from(0i128)],
@@ -277,7 +341,7 @@ impl LayerMap {
         }
 
         // Search the delta layers
-        let mut latest_delta: Option<Arc<dyn Layer>> = None;
+        let mut latest_delta: Option<Arc<PersistentLayerT>> = None;
         for e in self
             .historic_layers
             .locate_in_envelope_intersecting(&envelope)
@@ -301,7 +365,7 @@ impl LayerMap {
                 // No need to search any further
                 trace!(
                     "found layer {} for request on {key} at {end_lsn}",
-                    l.filename().display(),
+                    l.debug_short(),
                 );
                 latest_delta.replace(Arc::clone(l));
                 break;
@@ -319,7 +383,7 @@ impl LayerMap {
         if let Some(l) = latest_delta {
             trace!(
                 "found (old) layer {} for request on {key} at {end_lsn}",
-                l.filename().display(),
+                l.debug_short(),
             );
             let lsn_floor = std::cmp::max(
                 Lsn(latest_img_lsn.unwrap_or(Lsn(0)).0 + 1),
@@ -344,7 +408,7 @@ impl LayerMap {
     ///
     /// Insert an on-disk layer
     ///
-    pub fn insert_historic(&mut self, layer: Arc<dyn Layer>) {
+    pub fn insert_historic(&mut self, layer: Arc<PersistentLayerT>) {
         if layer.get_key_range() == (Key::MIN..Key::MAX) {
             self.l0_delta_layers.push(layer.clone());
         }
@@ -357,7 +421,7 @@ impl LayerMap {
     ///
     /// This should be called when the corresponding file on disk has been deleted.
     ///
-    pub fn remove_historic(&mut self, layer: Arc<dyn Layer>) {
+    pub fn remove_historic(&mut self, layer: Arc<PersistentLayerT>) {
         if layer.get_key_range() == (Key::MIN..Key::MAX) {
             let len_before = self.l0_delta_layers.len();
 
@@ -426,13 +490,13 @@ impl LayerMap {
         }
     }
 
-    pub fn iter_historic_layers(&self) -> impl '_ + Iterator<Item = Arc<dyn Layer>> {
+    pub fn iter_historic_layers(&self) -> impl '_ + Iterator<Item = Arc<PersistentLayerT>> {
         self.historic_layers.iter().map(|e| e.layer.clone())
     }
 
     /// Find the last image layer that covers 'key', ignoring any image layers
     /// newer than 'lsn'.
-    fn find_latest_image(&self, key: Key, lsn: Lsn) -> Option<Arc<dyn Layer>> {
+    fn find_latest_image(&self, key: Key, lsn: Lsn) -> Option<Arc<PersistentLayerT>> {
         let mut candidate_lsn = Lsn(0);
         let mut candidate = None;
         let envelope = AABB::from_corners(
@@ -474,7 +538,7 @@ impl LayerMap {
         &self,
         key_range: &Range<Key>,
         lsn: Lsn,
-    ) -> Result<Vec<(Range<Key>, Option<Arc<dyn Layer>>)>> {
+    ) -> Result<Vec<(Range<Key>, Option<Arc<PersistentLayerT>>)>> {
         let mut points = vec![key_range.start];
         let envelope = AABB::from_corners(
             [IntKey::from(key_range.start.to_i128()), IntKey::from(0)],
@@ -559,7 +623,7 @@ impl LayerMap {
     }
 
     /// Return all L0 delta layers
-    pub fn get_level0_deltas(&self) -> Result<Vec<Arc<dyn Layer>>> {
+    pub fn get_level0_deltas(&self) -> Result<Vec<Arc<PersistentLayerT>>> {
         Ok(self.l0_delta_layers.clone())
     }
 
