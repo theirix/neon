@@ -2,7 +2,7 @@
 //! in remote storage.
 //!
 use crate::config::PageServerConf;
-use crate::repository::{Key, Value};
+use crate::repository::Key;
 use crate::storage_sync::index::LayerFileMetadata;
 use crate::tenant::delta_layer::DeltaLayer;
 use crate::tenant::filename::{DeltaFileName, ImageFileName};
@@ -20,6 +20,8 @@ use utils::{
     id::{TenantId, TimelineId},
     lsn::Lsn,
 };
+
+use super::storage_layer::{LayerIter, LayerKeyIter};
 
 #[derive(Debug)]
 pub struct RemoteLayer {
@@ -90,13 +92,11 @@ impl Layer for RemoteLayer {
         bail!("layer {} needs to be downloaded", self.filename().display());
     }
 
-    fn iter<'a>(
-        &'a self,
-    ) -> Result<Box<dyn Iterator<Item = anyhow::Result<(Key, Lsn, Value)>> + 'a>> {
+    fn iter(&self) -> Result<LayerIter<'_>> {
         bail!("cannot iterate a remote layer");
     }
 
-    fn key_iter<'a>(&'a self) -> Result<Box<dyn Iterator<Item = (Key, Lsn, u64)> + 'a>> {
+    fn key_iter(&self) -> Result<LayerKeyIter<'_>> {
         bail!("cannot iterate a remote layer");
     }
 
