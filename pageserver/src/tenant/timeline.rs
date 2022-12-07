@@ -3,6 +3,7 @@
 use anyhow::{anyhow, bail, ensure, Context};
 use bytes::Bytes;
 use fail::fail_point;
+use futures::Future;
 use itertools::Itertools;
 use once_cell::sync::OnceCell;
 use pageserver_api::models::TimelineState;
@@ -21,6 +22,7 @@ use std::time::{Duration, Instant, SystemTime};
 
 use crate::storage_sync::index::IndexPart;
 use crate::storage_sync::RemoteTimelineClient;
+use crate::tenant::remote_layer::RemoteLayer;
 use crate::tenant::{
     delta_layer::{DeltaLayer, DeltaLayerWriter},
     ephemeral_file::is_ephemeral_file,
@@ -76,7 +78,7 @@ pub struct Timeline {
     conf: &'static PageServerConf,
     tenant_conf: Arc<RwLock<TenantConfOpt>>,
 
-    _myself: Weak<Self>,
+    myself: Weak<Self>,
 
     pub tenant_id: TenantId,
     pub timeline_id: TimelineId,
@@ -401,6 +403,11 @@ impl Timeline {
             .observe_closure_duration(|| self.reconstruct_value(key, lsn, reconstruct_state))
     }
 
+    // Like get(), but if a remote layer file is needed, it is downloaded on-demand
+    pub async fn get_download(&self, key: Key, lsn: Lsn) -> anyhow::Result<Bytes> {
+        retry_get(|| self.get(key, lsn)).await
+    }
+
     /// Get last or prev record separately. Same as get_last_record_rlsn().last/prev.
     pub fn get_last_record_lsn(&self) -> Lsn {
         self.last_record_lsn.load().last
@@ -570,14 +577,18 @@ impl Timeline {
 
         // Define partitioning schema if needed
 
-        match self.repartition(
-            self.get_last_record_lsn(),
-            self.get_compaction_target_size(),
-        ) {
+        match self
+            .repartition(
+                self.get_last_record_lsn(),
+                self.get_compaction_target_size(),
+            )
+            .await
+        {
             Ok((partitioning, lsn)) => {
                 // 2. Create new image layers for partitions that have been modified
                 // "enough".
-                let layer_paths_to_upload = self.create_image_layers(&partitioning, lsn, false)?;
+                let layer_paths_to_upload =
+                    self.create_image_layers(&partitioning, lsn, false).await?;
                 if let Some(remote_client) = &self.remote_client {
                     for (path, layer_metadata) in layer_paths_to_upload {
                         remote_client.schedule_layer_file_upload(&path, &layer_metadata)?;
@@ -759,7 +770,7 @@ impl Timeline {
             let mut result = Timeline {
                 conf,
                 tenant_conf,
-                _myself: myself.clone(),
+                myself: myself.clone(),
                 timeline_id,
                 tenant_id,
                 pg_version,
@@ -1005,6 +1016,7 @@ impl Timeline {
         Ok(())
     }
 
+    // FIXME rename to create_remote_layers
     async fn download_missing(
         &self,
         index_part: &IndexPart,
@@ -1088,21 +1100,18 @@ impl Timeline {
                         continue;
                     }
 
-                    trace!("downloading image file: {fname:?}");
-                    let sz = remote_client
-                        .download_layer_file(fname, &layer_metadata)
-                        .await
-                        .context("download image layer")?;
-                    trace!("done");
+                    let remote_layer = RemoteLayer::new_img(
+                        self.tenant_id,
+                        self.timeline_id,
+                        &imgfilename,
+                        &layer_metadata,
+                    );
 
-                    let image_layer =
-                        ImageLayer::new(self.conf, self.timeline_id, self.tenant_id, imgfilename);
-
+                    // FIXME: when to update physical size?
                     self.layers
                         .write()
                         .unwrap()
-                        .insert_historic(Arc::new(image_layer));
-                    self.metrics.current_physical_size_gauge.add(sz);
+                        .insert_historic(Arc::new(remote_layer));
                 }
                 LayerFileName::Delta(deltafilename) => {
                     // Create a DeltaLayer struct for each delta file.
@@ -1118,23 +1127,18 @@ impl Timeline {
                     );
                         continue;
                     }
+                    let remote_layer = RemoteLayer::new_delta(
+                        self.tenant_id,
+                        self.timeline_id,
+                        &deltafilename,
+                        &layer_metadata,
+                    );
 
-                    trace!("downloading delta file: {fname:?}");
-                    let sz = remote_client
-                        .download_layer_file(fname, &layer_metadata)
-                        .await
-                        .context("download delta layer")?;
-                    trace!("done");
-
-                    let delta_layer =
-                        DeltaLayer::new(self.conf, self.timeline_id, self.tenant_id, deltafilename);
-
+                    // FIXME: when to update physical size?
                     self.layers
                         .write()
                         .unwrap()
-                        .insert_historic(Arc::new(delta_layer));
-
-                    self.metrics.current_physical_size_gauge.add(sz);
+                        .insert_historic(Arc::new(remote_layer));
                 }
                 #[cfg(test)]
                 LayerFileName::Test(_) => unreachable!(),
@@ -1249,11 +1253,10 @@ impl Timeline {
                     let mut timeline_state_updates = self_clone.subscribe_for_state_updates();
                     let self_calculation = Arc::clone(&self_clone);
                     tokio::select! {
-                        calculation_result = spawn_blocking(move || self_calculation.calculate_logical_size(init_lsn)) => {
-                            let calculated_size = calculation_result
-                                .context("Failed to spawn calculation result task")?
-                                .context("Failed to calculate logical size")?;
-                            match self_clone.current_logical_size.initial_logical_size.set(calculated_size) {
+                        calculation_result = async { self_calculation.calculate_logical_size(init_lsn).await } => {
+                            let calculated_size = calculation_result.context("Failed to calculate logical size")?;
+                            let set_res = spawn_blocking(move || { self_clone.current_logical_size.initial_logical_size.set(calculated_size) }).await.context("spawn_blocking set initial_logical_size")?;
+                            match set_res {
                                 Ok(()) => info!("Successfully calculated initial logical size"),
                                 Err(existing_size) => error!("Tried to update initial timeline size value to {calculated_size}, but the size was already set to {existing_size}, not changing"),
                             }
@@ -1289,7 +1292,7 @@ impl Timeline {
     /// Calculate the logical size of the database at the latest LSN.
     ///
     /// NOTE: counted incrementally, includes ancestors, this can be a slow operation.
-    pub fn calculate_logical_size(&self, up_to_lsn: Lsn) -> anyhow::Result<u64> {
+    pub async fn calculate_logical_size(&self, up_to_lsn: Lsn) -> anyhow::Result<u64> {
         info!(
             "Calculating logical size for timeline {} at {}",
             self.timeline_id, up_to_lsn
@@ -1309,7 +1312,9 @@ impl Timeline {
         } else {
             self.metrics.logical_size_histo.start_timer()
         };
-        let logical_size = self.get_current_logical_size_non_incremental(up_to_lsn)?;
+        let logical_size = self
+            .get_current_logical_size_non_incremental(up_to_lsn)
+            .await?;
         debug!("calculated logical size: {logical_size}");
         timer.stop_and_record();
         Ok(logical_size)
@@ -1458,6 +1463,22 @@ impl Timeline {
 
             if let Some(SearchResult { lsn_floor, layer }) = layers.search(key, cont_lsn)? {
                 //info!("CHECKING for {} at {} on historic layer {}", key, cont_lsn, layer.filename().display());
+
+                //
+                // Is this a remote layer? If so, create a Future that the caller can use to
+                // download the missing layer, and return it.
+                //
+                if let Some(remote_layer) = super::storage_layer::downcast_remote_layer(&layer) {
+                    info!("need remote layer {}", remote_layer.filename().display());
+                    let tl = timeline.myself.upgrade().unwrap();
+
+                    let future = tl.download_remote_layer(Arc::clone(&remote_layer));
+
+                    let dynfuture: std::pin::Pin<
+                        Box<dyn Future<Output = anyhow::Result<()>> + Send + Sync>,
+                    > = Box::pin(future);
+                    return Err(PageReconstructError::NeedDownload(dynfuture));
+                }
 
                 let lsn_floor = max(cached_lsn + 1, lsn_floor);
                 result = layer.get_value_reconstruct_data(
@@ -1690,9 +1711,11 @@ impl Timeline {
         let lsn_range = frozen_layer.get_lsn_range();
         let layer_paths_to_upload =
             if lsn_range.start == self.initdb_lsn && lsn_range.end == Lsn(self.initdb_lsn.0 + 1) {
-                let (partitioning, _lsn) =
-                    self.repartition(self.initdb_lsn, self.get_compaction_target_size())?;
-                self.create_image_layers(&partitioning, self.initdb_lsn, true)?
+                let (partitioning, _lsn) = self
+                    .repartition(self.initdb_lsn, self.get_compaction_target_size())
+                    .await?;
+                self.create_image_layers(&partitioning, self.initdb_lsn, true)
+                    .await?
             } else {
                 // normal case, write out a L0 delta layer file.
                 let (delta_path, metadata) = self.create_delta_layer(&frozen_layer)?;
@@ -1841,15 +1864,28 @@ impl Timeline {
         Ok((new_delta_filename, LayerFileMetadata::new(sz)))
     }
 
-    fn repartition(&self, lsn: Lsn, partition_size: u64) -> anyhow::Result<(KeyPartitioning, Lsn)> {
-        let mut partitioning_guard = self.partitioning.lock().unwrap();
-        if partitioning_guard.1 == Lsn(0)
-            || lsn.0 - partitioning_guard.1 .0 > self.repartition_threshold
+    async fn repartition(
+        &self,
+        lsn: Lsn,
+        partition_size: u64,
+    ) -> anyhow::Result<(KeyPartitioning, Lsn)> {
         {
-            let keyspace = self.collect_keyspace(lsn)?;
-            let partitioning = keyspace.partition(partition_size);
+            let partitioning_guard = self.partitioning.lock().unwrap();
+            if partitioning_guard.1 != Lsn(0)
+                && lsn.0 - partitioning_guard.1 .0 <= self.repartition_threshold
+            {
+                // no repartitioning needed
+                return Ok((partitioning_guard.0.clone(), partitioning_guard.1));
+            }
+        }
+        let keyspace = self.collect_keyspace(lsn).await?;
+        let partitioning = keyspace.partition(partition_size);
+
+        let mut partitioning_guard = self.partitioning.lock().unwrap();
+        if lsn > partitioning_guard.1 {
             *partitioning_guard = (partitioning, lsn);
-            return Ok((partitioning_guard.0.clone(), lsn));
+        } else {
+            warn!("Concurrent repartitioning of keyspace. This unexpected, but probably harmless");
         }
         Ok((partitioning_guard.0.clone(), partitioning_guard.1))
     }
@@ -1895,7 +1931,7 @@ impl Timeline {
         Ok(false)
     }
 
-    fn create_image_layers(
+    async fn create_image_layers(
         &self,
         partitioning: &KeyPartitioning,
         lsn: Lsn,
@@ -1922,12 +1958,9 @@ impl Timeline {
                 for range in &partition.ranges {
                     let mut key = range.start;
                     while key < range.end {
-                        let img = match self.get(key, lsn) {
+                        let img = match self.get_download(key, lsn).await {
                             Ok(img) => img,
-                            Err(
-                                err @ PageReconstructError::Other(_)
-                                | err @ PageReconstructError::WalRedo(_),
-                            ) => {
+                            Err(err) => {
                                 // If we fail to reconstruct a VM or FSM page, we can zero the
                                 // page without losing any actual user data. That seems better
                                 // than failing repeatedly and getting stuck.
@@ -1947,7 +1980,7 @@ impl Timeline {
                                     warn!("could not reconstruct FSM or VM key {key}, filling with zeros: {err:?}");
                                     ZERO_PAGE.clone()
                                 } else {
-                                    return Err(anyhow::Error::new(err));
+                                    return Err(err);
                                 }
                             }
                         };
@@ -2705,6 +2738,94 @@ impl Timeline {
             }
         }
     }
+
+    ///
+    /// Download a layer file from remote storage,
+    ///
+    /// This does not retry if the download fails. TODO: we probably
+    /// should retry the download a couple of times
+    ///
+    #[instrument(skip(self), fields(tenant_id=%self.tenant_id, timeline_id=%self.timeline_id, file=%remote_layer.filename().display()))]
+    pub async fn download_remote_layer(
+        self: Arc<Self>,
+        remote_layer: Arc<RemoteLayer>,
+    ) -> anyhow::Result<()> {
+        let s = Arc::clone(&self);
+        let remote_layer = Arc::clone(&remote_layer);
+
+        // Start download, unless it's already in progress.
+        let mut receiver = {
+            let mut download_watch = remote_layer.download_watch.lock().unwrap();
+            if let Some(sender) = &*download_watch {
+                info!(
+                    "download of layer {} has already started, waiting",
+                    remote_layer.filename().display()
+                );
+                sender.subscribe()
+            } else {
+                let (sender, receiver) = tokio::sync::watch::channel(Ok(()));
+                *download_watch = Some(sender);
+
+                // Need to spawn, because the future returned by download_layer_file is
+                // not Sync. Spawn it in the storage sync runtime
+                let remote_layer = Arc::clone(&remote_layer);
+
+                task_mgr::spawn(
+                    &tokio::runtime::Handle::current(),
+                    TaskKind::RemoteDownloadTask,
+                    Some(self.tenant_id),
+                    Some(self.timeline_id),
+                    &format!("download layer {}", remote_layer.filename().display()),
+                    false,
+                    async move {
+                        let remote_client = s.remote_client.as_ref().unwrap();
+                        let result = remote_client
+                            .download_layer_file(
+                                &remote_layer.file_name,
+                                &remote_layer.layer_metadata,
+                            )
+                            .await;
+
+                        // Download complete. Replace the RemoteLayer with the corresponding
+                        // Delta- or ImageLayer in the layer map.
+                        let new_layer = remote_layer.create_downloaded_layer(self.conf);
+                        let mut layers = self.layers.write().unwrap();
+                        {
+                            let l: Arc<dyn Layer> = remote_layer.clone();
+                            layers.remove_historic(l);
+                        }
+                        layers.insert_historic(new_layer);
+                        drop(layers);
+
+                        // Notify waiters that the download has finished.
+                        if let Some(sender) = remote_layer.download_watch.lock().unwrap().as_ref() {
+                            let result = result.map(|_| ()); // download_watch doesn't care about size
+                            let _ = sender.send_replace(result);
+                        }
+                        Ok(())
+                    },
+                );
+                receiver
+            }
+        };
+
+        // Wait for the download to finish.
+        receiver.changed().await?;
+
+        // Was it successful?
+        //
+        // We cannot return the Result we received directly, because it does not
+        // implement Clone. We need to construct a new Error from it.
+        let x = receiver.borrow();
+        if let Err(err) = x.as_ref() {
+            bail!(
+                "could not download layer file {}: {:?}",
+                remote_layer.filename().display(),
+                err
+            );
+        }
+        Ok(())
+    }
 }
 
 /// An error happened in a get() operation.
@@ -2715,6 +2836,13 @@ pub enum PageReconstructError {
 
     #[error(transparent)]
     WalRedo(#[from] crate::walredo::WalRedoError),
+
+    /// A layer file is missing locally. You can call the returned Future to
+    /// download the missing layer, and after that finishes, the operation will
+    /// probably succeed if you retry it. (It can return NeedDownload again, if
+    /// another layer needs to be downloaded.).
+    #[error("layer file needs to be downloaded")]
+    NeedDownload(std::pin::Pin<Box<dyn Future<Output = anyhow::Result<()>> + Send + Sync>>),
 }
 
 impl std::fmt::Debug for PageReconstructError {
@@ -2722,7 +2850,39 @@ impl std::fmt::Debug for PageReconstructError {
         match self {
             PageReconstructError::Other(err) => err.fmt(f),
             PageReconstructError::WalRedo(err) => err.fmt(f),
+            // TODO: print more info about the missing layer
+            PageReconstructError::NeedDownload(_) => write!(f, "need to download a layer"),
         }
+    }
+}
+
+///
+/// Run a function that can return PageReconstructError, downloading the missing
+/// file and retrying if needed.
+///
+pub async fn retry_get_with_timeout<F, T>(f: F, timeout: Duration) -> Result<T, anyhow::Error>
+where
+    F: Send + Fn() -> Result<T, PageReconstructError>,
+    T: Send,
+{
+    match tokio::time::timeout(timeout, retry_get(f)).await {
+        Ok(r) => r,
+        Err(_) => bail!("timed out waiting for layer to be downloaded"),
+    }
+}
+
+pub async fn retry_get<F, T>(f: F) -> Result<T, anyhow::Error>
+where
+    F: Send + Fn() -> Result<T, PageReconstructError>,
+    T: Send,
+{
+    loop {
+        let result = f();
+        let future = match result {
+            Err(PageReconstructError::NeedDownload(future)) => future,
+            _ => return Ok(result?),
+        };
+        future.await?;
     }
 }
 
