@@ -1088,7 +1088,7 @@ impl Timeline {
                     let remote_layer = RemoteLayer::new_img(
                         self.tenant_id,
                         self.timeline_id,
-                        &imgfilename,
+                        imgfilename,
                         &remote_layer_metadata,
                     );
 
@@ -1114,7 +1114,7 @@ impl Timeline {
                     let remote_layer = RemoteLayer::new_delta(
                         self.tenant_id,
                         self.timeline_id,
-                        &deltafilename,
+                        deltafilename,
                         &remote_layer_metadata,
                     );
 
