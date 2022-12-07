@@ -49,6 +49,7 @@ use utils::{
 };
 
 use super::filename::LayerFileName;
+use super::layer_map::LayerMapLayer;
 
 ///
 /// Header stored in the beginning of the file
@@ -121,23 +122,7 @@ pub struct ImageLayerInner {
     file: Option<FileBlockReader<VirtualFile>>,
 }
 
-impl Layer for ImageLayer {
-    fn filename(&self) -> LayerFileName {
-        self.layer_name().into()
-    }
-
-    fn local_path(&self) -> Option<LayerFileName> {
-        Some(self.filename())
-    }
-
-    fn get_tenant_id(&self) -> TenantId {
-        self.tenant_id
-    }
-
-    fn get_timeline_id(&self) -> TimelineId {
-        self.timeline_id
-    }
-
+impl LayerMapLayer for ImageLayer {
     fn get_key_range(&self) -> Range<Key> {
         self.key_range.clone()
     }
@@ -145,6 +130,39 @@ impl Layer for ImageLayer {
     fn get_lsn_range(&self) -> Range<Lsn> {
         // End-bound is exclusive
         self.lsn..(self.lsn + 1)
+    }
+    fn is_incremental(&self) -> bool {
+        false
+    }
+
+    fn debug_short(&self) -> String {
+        self.filename().file_name()
+    }
+
+    /// debugging function to print out the contents of the layer
+    fn dump(&self, verbose: bool) -> Result<()> {
+        println!(
+            "----- image layer for ten {} tli {} key {}-{} at {} ----",
+            self.tenant_id, self.timeline_id, self.key_range.start, self.key_range.end, self.lsn
+        );
+
+        if !verbose {
+            return Ok(());
+        }
+
+        let inner = self.load()?;
+        let file = inner.file.as_ref().unwrap();
+        let tree_reader =
+            DiskBtreeReader::<_, KEY_SIZE>::new(inner.index_start_blk, inner.index_root_blk, file);
+
+        tree_reader.dump()?;
+
+        tree_reader.visit(&[0u8; KEY_SIZE], VisitDirection::Forwards, |key, value| {
+            println!("key: {} offset {}", hex::encode(key), value);
+            true
+        })?;
+
+        Ok(())
     }
 
     /// Look up given page in the file
@@ -181,7 +199,24 @@ impl Layer for ImageLayer {
             Ok(ValueReconstructResult::Missing)
         }
     }
+}
 
+impl Layer for ImageLayer {
+    fn filename(&self) -> LayerFileName {
+        self.layer_name().into()
+    }
+
+    fn local_path(&self) -> Option<LayerFileName> {
+        Some(self.filename())
+    }
+
+    fn get_tenant_id(&self) -> TenantId {
+        self.tenant_id
+    }
+
+    fn get_timeline_id(&self) -> TimelineId {
+        self.timeline_id
+    }
     fn iter(&self) -> Box<dyn Iterator<Item = Result<(Key, Lsn, Value)>>> {
         todo!();
     }
@@ -192,38 +227,17 @@ impl Layer for ImageLayer {
         Ok(())
     }
 
-    fn is_incremental(&self) -> bool {
-        false
-    }
-
     fn is_in_memory(&self) -> bool {
         false
     }
 
-    /// debugging function to print out the contents of the layer
-    fn dump(&self, verbose: bool) -> Result<()> {
-        println!(
-            "----- image layer for ten {} tli {} key {}-{} at {} ----",
-            self.tenant_id, self.timeline_id, self.key_range.start, self.key_range.end, self.lsn
-        );
-
-        if !verbose {
-            return Ok(());
-        }
-
-        let inner = self.load()?;
-        let file = inner.file.as_ref().unwrap();
-        let tree_reader =
-            DiskBtreeReader::<_, KEY_SIZE>::new(inner.index_start_blk, inner.index_root_blk, file);
-
-        tree_reader.dump()?;
-
-        tree_reader.visit(&[0u8; KEY_SIZE], VisitDirection::Forwards, |key, value| {
-            println!("key: {} offset {}", hex::encode(key), value);
-            true
-        })?;
-
-        Ok(())
+    fn as_arc_dyn_layer_map_layer<'a>(
+        self: std::sync::Arc<Self>,
+    ) -> std::sync::Arc<dyn LayerMapLayer>
+    where
+        Self: 'a,
+    {
+        self
     }
 }
 

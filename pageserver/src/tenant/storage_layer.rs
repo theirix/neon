@@ -7,6 +7,7 @@ use crate::walrecord::NeonWalRecord;
 use anyhow::Result;
 use bytes::Bytes;
 use std::ops::Range;
+use std::sync::Arc;
 
 use utils::{
     id::{TenantId, TimelineId},
@@ -14,6 +15,7 @@ use utils::{
 };
 
 use super::filename::LayerFileName;
+use super::layer_map::LayerMapLayer;
 pub fn range_overlaps<T>(a: &Range<T>, b: &Range<T>) -> bool
 where
     T: PartialOrd<T>,
@@ -83,22 +85,11 @@ pub enum ValueReconstructResult {
 /// An image layer is a snapshot of all the data in a key-range, at a single
 /// LSN
 ///
-pub trait Layer: Send + Sync {
+pub trait Layer: Send + Sync + LayerMapLayer {
     fn get_tenant_id(&self) -> TenantId;
 
     /// Identify the timeline this layer belongs to
     fn get_timeline_id(&self) -> TimelineId;
-
-    /// Range of keys that this layer covers
-    fn get_key_range(&self) -> Range<Key>;
-
-    /// Inclusive start bound of the LSN range that this layer holds
-    /// Exclusive end bound of the LSN range that this layer holds.
-    ///
-    /// - For an open in-memory layer, this is MAX_LSN.
-    /// - For a frozen in-memory layer or a delta layer, this is a valid end bound.
-    /// - An image layer represents snapshot at one LSN, so end_lsn is always the snapshot LSN + 1
-    fn get_lsn_range(&self) -> Range<Lsn>;
 
     /// Filename used to store this layer on disk. (Even in-memory layers
     /// implement this, to print a handy unique identifier for the layer for
@@ -107,31 +98,6 @@ pub trait Layer: Send + Sync {
 
     /// If a layer has a corresponding file on a local filesystem, return its absolute path.
     fn local_path(&self) -> Option<LayerFileName>;
-
-    ///
-    /// Return data needed to reconstruct given page at LSN.
-    ///
-    /// It is up to the caller to collect more data from previous layer and
-    /// perform WAL redo, if necessary.
-    ///
-    /// See PageReconstructResult for possible return values. The collected data
-    /// is appended to reconstruct_data; the caller should pass an empty struct
-    /// on first call, or a struct with a cached older image of the page if one
-    /// is available. If this returns PageReconstructResult::Continue, look up
-    /// the predecessor layer and call again with the same 'reconstruct_data' to
-    /// collect more data.
-    fn get_value_reconstruct_data(
-        &self,
-        key: Key,
-        lsn_range: Range<Lsn>,
-        reconstruct_data: &mut ValueReconstructState,
-    ) -> Result<ValueReconstructResult>;
-
-    /// Does this layer only contain some data for the key-range (incremental),
-    /// or does it contain a version of every page? This is important to know
-    /// for garbage collecting old layers: an incremental layer depends on
-    /// the previous non-incremental layer.
-    fn is_incremental(&self) -> bool;
 
     /// Returns true for layers that are represented in memory.
     fn is_in_memory(&self) -> bool;
@@ -148,6 +114,8 @@ pub trait Layer: Send + Sync {
     /// Permanently remove this layer from disk.
     fn delete(&self) -> Result<()>;
 
-    /// Dump summary of the contents of the layer to stdout
-    fn dump(&self, verbose: bool) -> Result<()>;
+    // https://articles.bchlr.de/traits-dynamic-dispatch-upcasting
+    fn as_arc_dyn_layer_map_layer<'a>(self: Arc<Self>) -> Arc<dyn LayerMapLayer>
+    where
+        Self: 'a;
 }
