@@ -205,6 +205,25 @@ pub struct TimelineInfo {
     pub state: TimelineState,
 }
 
+#[serde_as]
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct DownloadRemoteLayersTaskInfo {
+    pub task_id: String,
+    pub state: DownloadRemoteLayersTaskState,
+    pub total_layer_count: u64,         // stable once `completed`
+    pub successful_download_bytes: u64, // stable once `completed`
+    pub successful_download_count: u64, // stable once `completed`
+    pub failed_download_count: u64,     // stable once `completed`
+}
+
+#[serde_as]
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub enum DownloadRemoteLayersTaskState {
+    Running,
+    Completed,
+    ShutDown,
+}
+
 pub type ConfigureFailpointsRequest = Vec<FailpointConfig>;
 
 /// Information for configuring a single fail point
