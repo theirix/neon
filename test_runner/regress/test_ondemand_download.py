@@ -266,3 +266,132 @@ def test_ondemand_download_timetravel(
         log.info(f"physical_size[-1]={physical_size[-1]}")
         if len(physical_size) > 4:
             assert physical_size[-1] > physical_size[len(physical_size) - 4]
+
+
+#
+# Ensure that the `download_remote_layers` API works
+#
+@pytest.mark.parametrize("remote_storage_kind", [RemoteStorageKind.LOCAL_FS])
+def test_download_remote_layers_api(
+    neon_env_builder: NeonEnvBuilder,
+    remote_storage_kind: RemoteStorageKind,
+):
+    neon_env_builder.enable_remote_storage(
+        remote_storage_kind=remote_storage_kind,
+        test_name="test_download_remote_layers_api",
+    )
+
+    ##### First start, insert data and upload it to the remote storage
+    env = neon_env_builder.init_start()
+
+    # Override defaults, to create more layers
+    tenant, _ = env.neon_cli.create_tenant(
+        conf={
+            # Disable background GC & compaction
+            # We don't want GC, that would break the assertion about num downloads.
+            # We don't want background compaction, we force a compaction every time we do explicit checkpoint.
+            "gc_period": "0s",
+            "compaction_period": "0s",
+            # small checkpoint distance to create more delta layer files
+            "checkpoint_distance": f"{1 * 1024 ** 2}",  # 1 MB
+            "compaction_threshold": "1",
+            "image_creation_threshold": "1",
+            "compaction_target_size": f"{1 * 1024 ** 2}",  # 1 MB
+        }
+    )
+    env.initial_tenant = tenant
+
+    pg = env.postgres.create_start("main")
+
+    client = env.pageserver.http_client()
+
+    tenant_id = pg.safe_psql("show neon.tenant_id")[0][0]
+    timeline_id = pg.safe_psql("show neon.timeline_id")[0][0]
+
+    table_len = 10000
+    with pg.cursor() as cur:
+        cur.execute(
+            f"""
+        CREATE TABLE testtab(id serial primary key, checkpoint_number int, data text);
+        INSERT INTO testtab (checkpoint_number, data) SELECT 0, 'data' FROM generate_series(1, {table_len});
+        """
+        )
+
+    env.postgres.stop_all()
+
+    wait_for_sk_commit_lsn_to_reach_remote_storage(
+        tenant_id, timeline_id, env.safekeepers, env.pageserver
+    )
+
+    def get_physical_size():
+        d = client.timeline_detail(tenant_id, timeline_id)
+        return d["current_physical_size"]
+
+    filled_size = get_physical_size()
+    log.info(f"filled_size={filled_size}")
+
+    env.pageserver.stop()
+
+    # XXX only delete some of the layer files, to show that it really just downloads all the layers
+    dir_to_clear = Path(env.repo_dir) / "tenants"
+    shutil.rmtree(dir_to_clear)
+    os.mkdir(dir_to_clear)
+
+    ##### Second start, restore the data and ensure it's the same
+    env.pageserver.start()
+
+    client.tenant_attach(tenant_id)
+
+    wait_until(10, 0.2, lambda: assert_tenant_status(client, tenant_id, "Active"))
+
+    attached_size = get_physical_size()
+    log.info(f"attached_size={attached_size}")
+    assert attached_size < filled_size
+    assert filled_size - attached_size > 5 * (
+        1024**2
+    ), "at least a few layers must have been deleted"
+
+    ###### Phase 1: exercise download error code path
+
+    client.configure_failpoints(("remote-storage-download-pre-rename", "return"))
+    env.pageserver.allowed_errors.extend(
+        [
+            f".*download_all_remote_layers.*{tenant_id}.*{timeline_id}.*layer download failed.*remote-storage-download-pre-rename failpoint",
+            f".*initial size calculation.*{tenant_id}.*{timeline_id}.*Failed to calculate logical size",
+        ]
+    )
+
+    info = client.timeline_download_remote_layers(
+        tenant_id, timeline_id, errors_ok=True, at_least_one_download=False
+    )
+    log.info(f"info={info}")
+    assert info["state"] == "Completed"
+    assert info["total_layer_count"] > 0
+    assert info["successful_download_bytes"] == 0
+    assert info["successful_download_count"] == 0
+    assert (
+        info["failed_download_count"] > 0
+    )  # can't assert == total_layer_count because attach + tenant status downloads some layers
+    assert get_physical_size() == attached_size
+    # would be nice to assert that the layers in the layer map are still RemoteLayer
+
+    ##### Retry, this time without failpoints
+    client.configure_failpoints(("remote-storage-download-pre-rename", "off"))
+    info = client.timeline_download_remote_layers(tenant_id, timeline_id, errors_ok=False)
+    log.info(f"info={info}")
+
+    assert info["state"] == "Completed"
+    assert info["total_layer_count"] > 0
+    assert info["successful_download_bytes"] > 0
+    assert info["successful_download_count"] > 0
+    assert info["failed_download_count"] == 0
+
+    refilled_size = get_physical_size()
+    log.info(f"refilled_size={refilled_size}")
+
+    assert filled_size == refilled_size
+
+    # ensure that all the data is back
+    pg_old = env.postgres.create_start(branch_name="main")
+    with pg_old.cursor() as cur:
+        assert query_scalar(cur, "select count(*) from testtab") == table_len
