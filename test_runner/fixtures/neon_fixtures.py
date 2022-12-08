@@ -1267,6 +1267,62 @@ class PageserverHttpClient(requests.Session):
         res_json = res.json()
         assert res_json is None
 
+    def timeline_spawn_download_remote_layers(
+        self, tenant_id: TenantId, timeline_id: TimelineId
+    ) -> dict[str, Any]:
+
+        res = self.post(
+            f"http://localhost:{self.port}/v1/tenant/{tenant_id}/timeline/{timeline_id}/download_remote_layers",
+        )
+        self.verbose_error(res)
+        res_json = res.json()
+        assert res_json is not None
+        assert isinstance(res_json, dict)
+        return res_json
+
+    def timeline_poll_download_remote_layers_status(
+        self,
+        tenant_id: TenantId,
+        timeline_id: TimelineId,
+        spawn_response: dict[str, Any],
+        poll_state=None,
+    ) -> bool:
+        res = self.get(
+            f"http://localhost:{self.port}/v1/tenant/{tenant_id}/timeline/{timeline_id}/download_remote_layers",
+        )
+        self.verbose_error(res)
+        res_json = res.json()
+        assert res_json is not None
+        assert isinstance(res_json, dict)
+
+        # assumption in this API client here is that nobody else spawns the task
+        assert res_json["task_id"] == spawn_response["task_id"]
+
+        if poll_state is None or res_json["state"] == poll_state:
+            return res_json
+        return None
+
+    def timeline_download_remote_layers(
+        self,
+        tenant_id: TenantId,
+        timeline_id: TimelineId,
+        errors_ok=False,
+        at_least_one_download=True,
+    ):
+        res = self.timeline_spawn_download_remote_layers(tenant_id, timeline_id)
+        while True:
+            completed = self.timeline_poll_download_remote_layers_status(
+                tenant_id, timeline_id, res, poll_state="Completed"
+            )
+            if not completed:
+                time.sleep(0.1)
+                continue
+            if not errors_ok:
+                assert completed["failed_download_count"] == 0
+            if at_least_one_download:
+                assert completed["successful_download_count"] > 0
+            return completed
+
     def get_metrics(self) -> str:
         res = self.get(f"http://localhost:{self.port}/metrics")
         self.verbose_error(res)
