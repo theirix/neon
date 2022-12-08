@@ -1286,7 +1286,7 @@ class PageserverHttpClient(requests.Session):
         timeline_id: TimelineId,
         spawn_response: dict[str, Any],
         poll_state=None,
-    ) -> bool:
+    ) -> None | dict[str, Any]:
         res = self.get(
             f"http://localhost:{self.port}/v1/tenant/{tenant_id}/timeline/{timeline_id}/download_remote_layers",
         )
