@@ -3,10 +3,13 @@
 use anyhow::{anyhow, bail, ensure, Context};
 use bytes::Bytes;
 use fail::fail_point;
-use futures::Future;
+use futures::stream::FuturesUnordered;
+use futures::{Future, StreamExt};
 use itertools::Itertools;
 use once_cell::sync::OnceCell;
-use pageserver_api::models::TimelineState;
+use pageserver_api::models::{
+    DownloadRemoteLayersTaskInfo, DownloadRemoteLayersTaskState, TimelineState,
+};
 use tokio::sync::watch;
 use tokio::task::spawn_blocking;
 use tracing::*;
@@ -183,6 +186,8 @@ pub struct Timeline {
 
     /// Relation size cache
     pub rel_size_cache: RwLock<HashMap<RelTag, (Lsn, BlockNumber)>>,
+
+    download_all_remote_layers_task_info: RwLock<Option<DownloadRemoteLayersTaskInfo>>,
 
     state: watch::Sender<TimelineState>,
 }
@@ -821,6 +826,9 @@ impl Timeline {
 
                 last_received_wal: Mutex::new(None),
                 rel_size_cache: RwLock::new(HashMap::new()),
+
+                download_all_remote_layers_task_info: RwLock::new(None),
+
                 state,
             };
             result.repartition_threshold = result.get_checkpoint_distance() / 10;
@@ -2809,6 +2817,138 @@ impl Timeline {
             }
             Some(Ok(sz)) => Ok(*sz),
         }
+    }
+
+    pub async fn spawn_download_all_remote_layers(
+        self: Arc<Self>,
+    ) -> Result<DownloadRemoteLayersTaskInfo, DownloadRemoteLayersTaskInfo> {
+        let mut status_guard = self.download_all_remote_layers_task_info.write().unwrap();
+        if let Some(st) = &*status_guard {
+            match &st.state {
+                DownloadRemoteLayersTaskState::Running => {
+                    return Err(st.clone());
+                }
+                DownloadRemoteLayersTaskState::ShutDown
+                | DownloadRemoteLayersTaskState::Completed => {
+                    *status_guard = None;
+                }
+            }
+        }
+
+        let self_clone = Arc::clone(&self);
+        let task_id = task_mgr::spawn(
+            task_mgr::BACKGROUND_RUNTIME.handle(),
+            task_mgr::TaskKind::DownloadAllRemoteLayers,
+            Some(self.tenant_id),
+            Some(self.timeline_id),
+            "download all remote layers task",
+            false,
+            async move {
+                self_clone.download_all_remote_layers().await;
+                let mut status_guard = self_clone.download_all_remote_layers_task_info.write().unwrap();
+                 match &mut *status_guard {
+                    None => {
+                        warn!("tasks tatus is supposed to be Some(), since we are running");
+                    }
+                    Some(st) => {
+                        let exp_task_id = format!("{}", task_mgr::current_task_id().unwrap());
+                        if st.task_id != exp_task_id {
+                            warn!("task id changed while we were still running, expecting {} but have {}", exp_task_id, st.task_id);
+                        } else {
+                            st.state = DownloadRemoteLayersTaskState::Completed;
+                        }
+                    }
+                };
+                Ok(())
+            }
+            .instrument(info_span!(parent: None, "download_all_remote_layers", tenant = %self.tenant_id, timeline = %self.timeline_id))
+        );
+
+        let initial_info = DownloadRemoteLayersTaskInfo {
+            task_id: format!("{task_id}"),
+            state: DownloadRemoteLayersTaskState::Running,
+            total_layer_count: 0,
+            successful_download_bytes: 0,
+            successful_download_count: 0,
+            failed_download_count: 0,
+        };
+        *status_guard = Some(initial_info.clone());
+
+        Ok(initial_info)
+    }
+
+    async fn download_all_remote_layers(self: &Arc<Self>) {
+        let mut downloads: FuturesUnordered<_> = {
+            let layers = self.layers.read().unwrap();
+            layers
+                .iter_historic_layers()
+                .filter_map(|l| l.downcast_remote_layer())
+                .map({
+                    |l| {
+                        let self_clone = Arc::clone(self);
+                        self_clone.download_remote_layer(l)
+                    }
+                })
+                .collect()
+        };
+
+        macro_rules! lock_status {
+            ($st:ident) => {
+                let mut st = self.download_all_remote_layers_task_info.write().unwrap();
+                let st = st
+                    .as_mut()
+                    .expect("this function is only called after the task has been spawned");
+                assert_eq!(
+                    st.task_id,
+                    format!(
+                        "{}",
+                        task_mgr::current_task_id().expect("we run inside a task_mgr task")
+                    )
+                );
+                let $st = st;
+            };
+        }
+
+        {
+            lock_status!(st);
+            st.total_layer_count = downloads.len().try_into().unwrap();
+        }
+        loop {
+            tokio::select! {
+                dl = downloads.next() => {
+                    lock_status!(st);
+                    st.total_layer_count += 1;
+                    match dl {
+                        None => break,
+                        Some(Ok(sz)) => {
+                            st.successful_download_count += 1;
+                            st.successful_download_bytes += sz;
+                        },
+                        Some(Err(e)) => {
+                            error!(error = %e, "layer download failed");
+                            st.failed_download_count += 1;
+                        }
+                    }
+                }
+                _ = task_mgr::shutdown_watcher() => {
+                    // Kind of pointless to watch for shutdowns here,
+                    // as download_remote_layer spawns other task_mgr tasks internally.
+                    lock_status!(st);
+                    st.state = DownloadRemoteLayersTaskState::ShutDown;
+                }
+            }
+        }
+        {
+            lock_status!(st);
+            st.state = DownloadRemoteLayersTaskState::Completed;
+        }
+    }
+
+    pub fn get_download_all_remote_layers_task_info(&self) -> Option<DownloadRemoteLayersTaskInfo> {
+        self.download_all_remote_layers_task_info
+            .read()
+            .unwrap()
+            .clone()
     }
 }
 
