@@ -43,7 +43,7 @@ pub struct RemoteLayer {
     /// download finishes. If it's None, no download is in progress yet.
     /// See Timeline::download_remote_layer(), that is the higher-level function
     /// to coordinate layer download.
-    pub download_watch: Mutex<Option<tokio::sync::watch::Sender<Result<()>>>>,
+    pub download_watch: Mutex<Option<tokio::sync::watch::Sender<Option<Result<u64>>>>>,
 }
 
 impl Layer for RemoteLayer {

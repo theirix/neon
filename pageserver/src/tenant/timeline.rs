@@ -1456,7 +1456,7 @@ impl Timeline {
                     let future = tl.download_remote_layer(Arc::clone(&remote_layer));
 
                     let dynfuture: std::pin::Pin<
-                        Box<dyn Future<Output = anyhow::Result<()>> + Send + Sync>,
+                        Box<dyn Future<Output = anyhow::Result<u64>> + Send + Sync>,
                     > = Box::pin(future);
                     return Err(PageReconstructError::NeedDownload(dynfuture));
                 }
@@ -2727,7 +2727,7 @@ impl Timeline {
     pub async fn download_remote_layer(
         self: Arc<Self>,
         remote_layer: Arc<RemoteLayer>,
-    ) -> anyhow::Result<()> {
+    ) -> anyhow::Result<u64> {
         let s = Arc::clone(&self);
         let remote_layer = Arc::clone(&remote_layer);
 
@@ -2744,7 +2744,7 @@ impl Timeline {
                 );
                 sender.subscribe()
             } else {
-                let (sender, receiver) = tokio::sync::watch::channel(Ok(()));
+                let (sender, receiver) = tokio::sync::watch::channel(None);
                 *download_watch = Some(sender);
 
                 // Need to spawn, because the future returned by download_layer_file is
@@ -2781,8 +2781,7 @@ impl Timeline {
 
                         // Notify waiters that the download has finished.
                         if let Some(sender) = remote_layer.download_watch.lock().unwrap().as_ref() {
-                            let result = result.map(|_| ()); // download_watch doesn't care about size
-                            let _ = sender.send_replace(result);
+                            let _ = sender.send_replace(Some(result));
                         }
                         Ok(())
                     },
@@ -2799,14 +2798,17 @@ impl Timeline {
         // We cannot return the Result we received directly, because it does not
         // implement Clone. We need to construct a new Error from it.
         let x = receiver.borrow();
-        if let Err(err) = x.as_ref() {
-            bail!(
-                "could not download layer file {}: {:?}",
-                remote_layer.filename().display(),
-                err
-            );
+        match x.as_ref() {
+            None => unreachable!("sender only updates the watch once with Some()"),
+            Some(Err(err)) => {
+                bail!(
+                    "could not download layer file {}: {:?}",
+                    remote_layer.filename().display(),
+                    err
+                );
+            }
+            Some(Ok(sz)) => Ok(*sz),
         }
-        Ok(())
     }
 }
 
@@ -2824,7 +2826,7 @@ pub enum PageReconstructError {
     /// probably succeed if you retry it. (It can return NeedDownload again, if
     /// another layer needs to be downloaded.).
     #[error("layer file needs to be downloaded")]
-    NeedDownload(std::pin::Pin<Box<dyn Future<Output = anyhow::Result<()>> + Send + Sync>>),
+    NeedDownload(std::pin::Pin<Box<dyn Future<Output = anyhow::Result<u64>> + Send + Sync>>),
 }
 
 impl std::fmt::Debug for PageReconstructError {
