@@ -808,6 +808,45 @@ async fn timeline_checkpoint_handler(request: Request<Body>) -> Result<Response<
     json_response(StatusCode::OK, ())
 }
 
+async fn timeline_download_remote_layers_handler_post(
+    request: Request<Body>,
+) -> Result<Response<Body>, ApiError> {
+    let tenant_id: TenantId = parse_request_param(&request, "tenant_id")?;
+    let timeline_id: TimelineId = parse_request_param(&request, "timeline_id")?;
+    check_permission(&request, Some(tenant_id))?;
+
+    let tenant = tenant_mgr::get_tenant(tenant_id, true)
+        .await
+        .map_err(ApiError::NotFound)?;
+    let timeline = tenant
+        .get_timeline(timeline_id, true)
+        .map_err(ApiError::NotFound)?;
+    match timeline.spawn_download_all_remote_layers().await {
+        Ok(st) => json_response(StatusCode::CREATED, st),
+        Err(st) => json_response(StatusCode::CONFLICT, st),
+    }
+}
+
+async fn timeline_download_remote_layers_handler_get(
+    request: Request<Body>,
+) -> Result<Response<Body>, ApiError> {
+    let tenant_id: TenantId = parse_request_param(&request, "tenant_id")?;
+    let timeline_id: TimelineId = parse_request_param(&request, "timeline_id")?;
+    check_permission(&request, Some(tenant_id))?;
+
+    let tenant = tenant_mgr::get_tenant(tenant_id, true)
+        .await
+        .map_err(ApiError::NotFound)?;
+    let timeline = tenant
+        .get_timeline(timeline_id, true)
+        .map_err(ApiError::NotFound)?;
+    let info = timeline
+        .get_download_all_remote_layers_task_info()
+        .context("task never started since last pageserver process start")
+        .map_err(ApiError::NotFound)?;
+    json_response(StatusCode::OK, info)
+}
+
 async fn handler_404(_: Request<Body>) -> Result<Response<Body>, ApiError> {
     json_response(
         StatusCode::NOT_FOUND,
@@ -891,6 +930,14 @@ pub fn make_router(
         .put(
             "/v1/tenant/:tenant_id/timeline/:timeline_id/checkpoint",
             testing_api!("run timeline checkpoint", timeline_checkpoint_handler),
+        )
+        .post(
+            "/v1/tenant/:tenant_id/timeline/:timeline_id/download_remote_layers",
+            timeline_download_remote_layers_handler_post,
+        )
+        .get(
+            "/v1/tenant/:tenant_id/timeline/:timeline_id/download_remote_layers",
+            timeline_download_remote_layers_handler_get,
         )
         .delete(
             "/v1/tenant/:tenant_id/timeline/:timeline_id",
