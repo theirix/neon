@@ -95,10 +95,7 @@ pub struct Timeline {
     walredo_mgr: Arc<dyn WalRedoManager + Sync + Send>,
 
     /// Remote storage client.
-    ///
-    /// If Some, use it to upload all newly created layers to the remote storage,
-    /// and keep remote metadata file in sync. In the future, also use it to download
-    /// layer files on-demand.
+    /// See [`storage_sync2`] module comment for details.
     pub remote_client: Option<Arc<RemoteTimelineClient>>,
 
     // What page versions do we hold in the repository? If we get a
@@ -403,7 +400,7 @@ impl Timeline {
             .observe_closure_duration(|| self.reconstruct_value(key, lsn, reconstruct_state))
     }
 
-    // Like get(), but if a remote layer file is needed, it is downloaded on-demand
+    // Like get(), but if a remote layer file is needed, it is downloaded as part of this call.
     pub async fn get_download(&self, key: Key, lsn: Lsn) -> anyhow::Result<Bytes> {
         retry_get(|| self.get(key, lsn)).await
     }
@@ -1022,13 +1019,7 @@ impl Timeline {
         up_to_date_disk_consistent_lsn: Lsn,
     ) -> anyhow::Result<HashMap<LayerFileName, Arc<dyn PersistentLayer>>> {
         // Are we missing some files that are present in remote storage?
-        // Download them now.
-        // TODO Downloading many files this way is not efficient.
-        //     Better to use FuturesUnordered. Maybe keep as is because:
-        //    a) inplace download is a throw-away code, on-demand patch doesnt need that
-        //    b) typical case now is that there is nothing to sync, this downloads a lot
-        //       1) if there was another pageserver that came and generated new files
-        //       2) during attach of a timeline with big history which we currently do not do
+        // Create RemoteLayer instances for them.
         let mut local_only_layers = local_layers;
         let timeline_dir = self.conf.timeline_path(&self.timeline_id, &self.tenant_id);
         for remote_layer_name in &index_part.timeline_layers {
@@ -1098,7 +1089,7 @@ impl Timeline {
                         .insert_historic(Arc::new(remote_layer));
                 }
                 LayerFileName::Delta(deltafilename) => {
-                    // Create a DeltaLayer struct for each delta file.
+                    // Create a RemoteLayer for the delta file.
                     // The end-LSN is exclusive, while disk_consistent_lsn is
                     // inclusive. For example, if disk_consistent_lsn is 100, it is
                     // OK for a delta layer to have end LSN 101, but if the end LSN
@@ -1106,9 +1097,9 @@ impl Timeline {
                     // before crash.
                     if deltafilename.lsn_range.end > up_to_date_disk_consistent_lsn + 1 {
                         warn!(
-                        "found future delta layer {} on timeline {} remote_consistent_lsn is {}",
-                        deltafilename, self.timeline_id, up_to_date_disk_consistent_lsn
-                    );
+                            "found future delta layer {} on timeline {} remote_consistent_lsn is {}",
+                            deltafilename, self.timeline_id, up_to_date_disk_consistent_lsn
+                        );
                         continue;
                     }
                     let remote_layer = RemoteLayer::new_delta(
