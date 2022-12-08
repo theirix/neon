@@ -2767,6 +2767,9 @@ impl Timeline {
         let remote_layer = Arc::clone(&remote_layer);
 
         // Start download, unless it's already in progress.
+        // FIXME if `remote_layer` has finished downloading (and replaced itself in the layer
+        // map with the downloaded image), but someone is still holding a reference to
+        // it, then we'd be re-downloading it, and overwriting the layer file while at it.
         let mut receiver = {
             let mut download_watch = remote_layer.download_watch.lock().unwrap();
             if let Some(sender) = &*download_watch {
