@@ -1902,7 +1902,6 @@ class NeonPageserver(PgProtocol):
             ".*query handler for 'pagestream.*failed: Timeline .* is not active",  # timeline delete in progress
             # FIXME: on-demand download causes these, need to triage
             ".*could not compact, repartitioning keyspace failed: layer file needs to be downloaded",
-            ".*Gc failed, retrying in .*: layer file needs to be downloaded",
         ]
 
     def start(
