@@ -163,7 +163,7 @@ pub struct Timeline {
 
     // List of child timelines and their branch points. This is needed to avoid
     // garbage collecting data that is still needed by the child timelines.
-    pub gc_info: RwLock<GcInfo>,
+    pub gc_info: tokio::sync::RwLock<GcInfo>,
 
     // It may change across major versions so for simplicity
     // keep it after running initdb for a timeline.
@@ -806,7 +806,7 @@ impl Timeline {
                 write_lock: Mutex::new(()),
                 layer_removal_cs: Default::default(),
 
-                gc_info: RwLock::new(GcInfo {
+                gc_info: tokio::sync::RwLock::new(GcInfo {
                     retain_lsns: Vec::new(),
                     horizon_cutoff: Lsn(0),
                     pitr_cutoff: Lsn(0),
@@ -2400,13 +2400,13 @@ impl Timeline {
     ///
     /// The 'pitr' duration is used to calculate a 'pitr_cutoff', which can be used to determine
     /// whether a record is needed for PITR.
-    pub(super) fn update_gc_info(
+    pub(super) async fn update_gc_info(
         &self,
         retain_lsns: Vec<Lsn>,
         cutoff_horizon: Lsn,
         pitr: Duration,
     ) -> anyhow::Result<()> {
-        let mut gc_info = self.gc_info.write().unwrap();
+        let mut gc_info = self.gc_info.write().await;
 
         gc_info.horizon_cutoff = cutoff_horizon;
         gc_info.retain_lsns = retain_lsns;
@@ -2471,7 +2471,7 @@ impl Timeline {
         }
 
         let (horizon_cutoff, pitr_cutoff, retain_lsns) = {
-            let gc_info = self.gc_info.read().unwrap();
+            let gc_info = self.gc_info.read().await;
 
             let horizon_cutoff = min(gc_info.horizon_cutoff, self.get_disk_consistent_lsn());
             let pitr_cutoff = gc_info.pitr_cutoff;
