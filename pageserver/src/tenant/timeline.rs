@@ -2629,7 +2629,7 @@ impl Timeline {
                     .sub(path.metadata()?.len());
                 layer_paths_to_delete.push(fname);
             }
-            doomed_layer.delete()?;
+            doomed_layer.delete()?; // FIXME: schedule succeeded deletions before returning?
             layers.remove_historic(doomed_layer);
             result.layers_removed += 1;
         }
