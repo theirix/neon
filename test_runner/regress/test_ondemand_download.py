@@ -340,6 +340,13 @@ def test_download_remote_layers_api(
     ##### Second start, restore the data and ensure it's the same
     env.pageserver.start()
 
+    # Shut down safekeepers before attaching the tenant.
+    # If we don't, the tenant's walreceiver handler will trigger the
+    # the logical size computation task, and that downloads layes,
+    # which makes our assertions on size fail.
+    for sk in env.safekeepers:
+        sk.stop(immediate=True)
+
     client.tenant_attach(tenant_id)
 
     wait_until(10, 0.2, lambda: assert_tenant_status(client, tenant_id, "Active"))
@@ -390,6 +397,9 @@ def test_download_remote_layers_api(
     log.info(f"refilled_size={refilled_size}")
 
     assert filled_size == refilled_size
+
+    for sk in env.safekeepers:
+        sk.start()
 
     # ensure that all the data is back
     pg_old = env.postgres.create_start(branch_name="main")
