@@ -2444,7 +2444,7 @@ impl Timeline {
             if let Some(pitr_cutoff_timestamp) = now.checked_sub(pitr) {
                 let pitr_timestamp = to_pg_timestamp(pitr_cutoff_timestamp);
 
-                match self.find_lsn_for_timestamp(pitr_timestamp)? {
+                match retry_get(|| self.find_lsn_for_timestamp(pitr_timestamp)).await? {
                     LsnForTimestamp::Present(lsn) => pitr_cutoff_lsn = lsn,
                     LsnForTimestamp::Future(lsn) => {
                         debug!("future({})", lsn);
@@ -2653,8 +2653,8 @@ impl Timeline {
         }
 
         // Actually delete the layers from disk and remove them from the map.
-        // (couldn't do this in the loop above, because you cannot modify a collection
-        // while iterating it. BTreeMap::retain() would be another option)
+        // Collect the layer names to schedule deletion in the remote storage
+        // in a bulk operation.
         let mut layer_names_to_delete = Vec::with_capacity(layers_to_remove.len());
         for doomed_layer in layers_to_remove {
             if let Some(path) = doomed_layer.local_path() {
