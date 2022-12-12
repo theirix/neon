@@ -1248,10 +1248,17 @@ impl Timeline {
                     let mut timeline_state_updates = self_clone.subscribe_for_state_updates();
                     let self_calculation = Arc::clone(&self_clone);
                     tokio::select! {
-                        calculation_result = async { self_calculation.calculate_logical_size(init_lsn).await } => {
-                            let calculated_size = calculation_result.context("Failed to calculate logical size")?;
-                            let set_res = spawn_blocking(move || { self_clone.current_logical_size.initial_logical_size.set(calculated_size) }).await.context("spawn_blocking set initial_logical_size")?;
-                            match set_res {
+                        calculation_result = spawn_blocking(move || {
+                            // Run in a separate thread since this can do a lot of
+                            // synchronous file IO without .await inbetween
+                            // if there are no RemoteLayers that would require downloading.
+                            let h = tokio::runtime::Handle::current();
+                            h.block_on(self_calculation.calculate_logical_size(init_lsn))
+                        }) => {
+                            let calculated_size = calculation_result
+                                .context("Failed to spawn calculation result task")?
+                                .context("Failed to calculate logical size")?;
+                            match self_clone.current_logical_size.initial_logical_size.set(calculated_size) {
                                 Ok(()) => info!("Successfully calculated initial logical size"),
                                 Err(existing_size) => error!("Tried to update initial timeline size value to {calculated_size}, but the size was already set to {existing_size}, not changing"),
                             }
