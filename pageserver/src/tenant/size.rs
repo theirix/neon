@@ -363,9 +363,16 @@ async fn calculate_logical_size(
         .await
         .expect("global semaphore should not had been closed");
 
-    let _permit = permit;
-    let size_res = timeline.calculate_logical_size(lsn).await;
-    Ok(TimelineAtLsnSizeResult(timeline, lsn, size_res))
+    // Run in a separate thread since this can do a lot of
+    // synchronous file IO without .await inbetween
+    // if there are no RemoteLayers that would require downloading.
+    tokio::task::spawn_blocking(move || {
+        let _permit = permit;
+        let h = tokio::runtime::Handle::current();
+        let size_res = h.block_on(timeline.calculate_logical_size(lsn));
+        TimelineAtLsnSizeResult(timeline, lsn, size_res)
+    })
+    .await
 }
 
 #[test]
