@@ -147,7 +147,8 @@ pub trait Layer: Send + Sync + PureLayer {
     fn filename(&self) -> LayerFileName;
 
     // Path to the layer file in the local filesystem.
-    fn local_path(&self) -> PathBuf;
+    // `None` for `RemoteLayer`.
+    fn local_path(&self) -> Option<PathBuf>;
 
     /// Iterate through all keys and values stored in the layer
     fn iter(&self) -> Result<LayerIter<'_>>;
