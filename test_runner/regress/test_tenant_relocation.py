@@ -409,13 +409,11 @@ def test_tenant_relocation(
             # call to attach timeline to new pageserver
             new_pageserver_http.tenant_attach(tenant_id)
 
-            # check that it shows that download is in progress
+            # wait for tenant to finish attaching
             tenant_status = new_pageserver_http.tenant_status(tenant_id=tenant_id)
             assert tenant_status["state"] in ["Attaching", "Active"]
-
-            # wait until tenant is downloaded
             wait_until(
-                number_of_iterations=100,
+                number_of_iterations=10,
                 interval=1,
                 func=lambda: assert_tenant_status(new_pageserver_http, tenant_id, "Active"),
             )
