@@ -1132,22 +1132,22 @@ impl Timeline {
         Ok(local_only_layers)
     }
 
+    /// This function will synchronize local state with what we have in remote storage.
     ///
-    /// This function will synchronize local data with what we have in remote storage.
-    /// 1. It will download missing layer files.
-    /// 2. It will update local metadata if remote one has greater `disk_consistent_lsn`.
-    /// 3. It will upload files that are missing on the remote
-    /// 4. It will update index file on the remote accordingly
-    /// TODO may be a bit cleaner to do things based on populated remote client,
-    ///     and then do things based on its upload_queue.latest_files
+    /// Steps taken:
+    /// 1. Initialize upload queue based on `index_part`.
+    /// 2. Create `RemoteLayer` instances for layers that exist only on the remote.
+    ///    The list of layers on the remote comes from `index_part`.
+    ///    The list of local layers is given by the layer map's `iter_historic_layers()`.
+    ///    So, the layer map must have been loaded already.
+    /// 3. Schedule upload of local-only layer files (which will then also update the remote
+    ///    IndexPart to include the new layer files).
     ///
-    /// This is used during tenant attach. The layer map must have been loaded
-    /// with local filesystem contents already.
+    /// Refer to the `storage_sync2` module comment for more context.
     ///
-    /// The caller should provide IndexPart if it exists on the remote storage. If it's None,
-    /// we assume that it is missing on the remote storage, which means that we initialized
-    /// a timeline and then restarted before successful upload was performed
-    ///
+    /// # TODO
+    /// May be a bit cleaner to do things based on populated remote client,
+    /// and then do things based on its upload_queue.latest_files.
     #[instrument(skip(self, index_part, up_to_date_metadata))]
     pub async fn reconcile_with_remote(
         &self,
