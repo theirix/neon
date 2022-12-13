@@ -6,3 +6,7 @@
 	path = vendor/postgres-v15
 	url = https://github.com/neondatabase/postgres.git
 	branch = REL_15_STABLE_neon
+[submodule "cloud"]
+	path = cloud
+	url = https://github.com/neondatabase/cloud.git
+	branch = extract-control-plane
