@@ -372,7 +372,7 @@ def test_timeline_size_metrics(
     # get the metrics and parse the metric for the current timeline's physical size
     metrics = env.pageserver.http_client().get_metrics()
     matches = re.search(
-        f'^pageserver_current_physical_size{{tenant_id="{env.initial_tenant}",timeline_id="{new_timeline_id}"}} (\\S+)$',
+        f'^pageserver_resident_physical_size{{tenant_id="{env.initial_tenant}",timeline_id="{new_timeline_id}"}} (\\S+)$',
         metrics,
         re.MULTILINE,
     )

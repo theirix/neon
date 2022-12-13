@@ -41,7 +41,7 @@ def parse_metrics(text: str, name: str = "") -> Metrics:
 
 PAGESERVER_PER_TENANT_METRICS: Tuple[str, ...] = (
     "pageserver_current_logical_size",
-    "pageserver_current_physical_size",
+    "pageserver_resident_physical_size",
     "pageserver_getpage_reconstruct_seconds_bucket",
     "pageserver_getpage_reconstruct_seconds_count",
     "pageserver_getpage_reconstruct_seconds_sum",
