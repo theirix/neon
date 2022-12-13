@@ -172,6 +172,13 @@ pub trait PersistentLayer: Layer {
     fn is_remote_layer(&self) -> bool {
         false
     }
+
+    /// Returns None if the layer file size is not known.
+    ///
+    /// Must not change over the lifetime of the layer object because
+    /// resident_physical_size_guage and s3_physical_size_guage are updated
+    /// for RemoteLayer's in response to this value.
+    fn file_size(&self) -> Option<u64>;
 }
 
 pub fn downcast_remote_layer(
