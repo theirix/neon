@@ -1030,11 +1030,12 @@ impl Timeline {
                 .unwrap_or(LayerFileMetadata::MISSING);
 
             // Is the local layer's size different from the size stored in the
-            // remote index file? If so, rename_to_backup those files & remove
-            // local_layer form the layer map.
-            // We'll download a fresh copy of the layer file below.
+            // remote index file?
+            // If so, rename_to_backup those files & replace their local layer with
+            // a RemoteLayer in the laye rmap so that we re-download them on-demand.
             if let Some(local_layer) = local_layer {
-                let local_layer_path = local_layer.local_path();
+                let local_layer_path = local_layer.local_path()
+                    .expect("caller must ensure that local_layers only contains local layers");
                 ensure!(
                     local_layer_path.exists(),
                     "every layer from local_layers must exist on disk: {}",
