@@ -443,7 +443,7 @@ impl Timeline {
 
     /// Get the physical size of the timeline at the latest LSN
     pub fn get_physical_size(&self) -> u64 {
-        self.metrics.current_physical_size_gauge.get()
+        self.metrics.resident_physical_size_gauge.get()
     }
 
     /// Get the physical size of the timeline at the latest LSN non incrementally
@@ -1016,7 +1016,7 @@ impl Timeline {
             num_layers, disk_consistent_lsn, total_physical_size
         );
         self.metrics
-            .current_physical_size_gauge
+            .resident_physical_size_gauge
             .set(total_physical_size);
 
         timer.stop_and_record();
@@ -1070,7 +1070,7 @@ impl Timeline {
                             assert!(local_layer_path.exists(), "we would leave the local_layer without a file if this does not hold: {}", local_layer_path.display());
                             anyhow::bail!("could not rename file {local_layer_path:?}: {err:?}");
                         } else {
-                            self.metrics.current_physical_size_gauge.sub(local_size);
+                            self.metrics.resident_physical_size_gauge.sub(local_size);
                             self.layers.write().unwrap().remove_historic(local_layer);
                             // fall-through to adding the remote layer
                         }
@@ -2009,7 +2009,7 @@ impl Timeline {
         // update the timeline's physical size
         let sz = new_delta_path.metadata()?.len();
 
-        self.metrics.current_physical_size_gauge.add(sz);
+        self.metrics.resident_physical_size_gauge.add(sz);
         // update metrics
         self.metrics.num_persistent_files_created.inc_by(1);
         self.metrics.persistent_bytes_written.inc_by(sz);
@@ -2174,7 +2174,9 @@ impl Timeline {
 
             layer_paths_to_upload.insert(path, LayerFileMetadata::new(metadata.len()));
 
-            self.metrics.current_physical_size_gauge.add(metadata.len());
+            self.metrics
+                .resident_physical_size_gauge
+                .add(metadata.len());
             layers.insert_historic(Arc::new(l));
         }
         drop(layers);
@@ -2481,7 +2483,9 @@ impl Timeline {
             }
 
             // update the timeline's physical size
-            self.metrics.current_physical_size_gauge.add(metadata.len());
+            self.metrics
+                .resident_physical_size_gauge
+                .add(metadata.len());
 
             new_layer_paths.insert(new_delta_path, LayerFileMetadata::new(metadata.len()));
             let x: Arc<dyn PersistentLayer + 'static> = Arc::new(l);
@@ -2494,7 +2498,7 @@ impl Timeline {
         for l in deltas_to_compact {
             if let Some(path) = l.local_path() {
                 self.metrics
-                    .current_physical_size_gauge
+                    .resident_physical_size_gauge
                     .sub(path.metadata()?.len());
             }
             layer_names_to_delete.push(l.filename());
@@ -2781,7 +2785,7 @@ impl Timeline {
             for doomed_layer in layers_to_remove {
                 if let Some(path) = doomed_layer.local_path() {
                     self.metrics
-                        .current_physical_size_gauge
+                        .resident_physical_size_gauge
                         .sub(path.metadata()?.len());
                 }
                 layer_names_to_delete.push(doomed_layer.filename());
@@ -3002,7 +3006,7 @@ impl Timeline {
                 if let Ok(size) = &result {
                     // XXX the temp file is still around in Err() case
                     // and consumes space until we clean up upon pageserver restart.
-                    self.metrics.current_physical_size_gauge.add(*size);
+                    self.metrics.resident_physical_size_gauge.add(*size);
 
                     // Download complete. Replace the RemoteLayer with the corresponding
                     // Delta- or ImageLayer in the layer map.
