@@ -313,6 +313,25 @@ impl LogicalSize {
     }
 }
 
+/// Returned by [`Timeline::layer_size_sum`]
+pub enum LayerSizeSum {
+    /// The result is accurate.
+    Accurate(u64),
+    // We don't know the layer file size of one or more layers.
+    // They contribute to the sum with a value of 0.
+    // Hence, the sum is a lower bound for the actualy layer file size sum.
+    ApproximateLowerBound(u64),
+}
+
+impl LayerSizeSum {
+    pub fn approximate_is_ok(self) -> u64 {
+        match self {
+            LayerSizeSum::Accurate(v) => v,
+            LayerSizeSum::ApproximateLowerBound(v) => v,
+        }
+    }
+}
+
 pub struct WalReceiverInfo {
     pub wal_source_connconf: PgConnectionConfig,
     pub last_received_msg_lsn: Lsn,
@@ -441,30 +460,23 @@ impl Timeline {
         }
     }
 
-    /// Get the physical size of the timeline at the latest LSN
-    pub fn get_physical_size(&self) -> u64 {
-        self.metrics.resident_physical_size_gauge.get()
-    }
-
-    /// Get the physical size of the timeline at the latest LSN non incrementally
-    pub fn get_physical_size_non_incremental(&self) -> anyhow::Result<u64> {
-        let timeline_path = self.conf.timeline_path(&self.timeline_id, &self.tenant_id);
-        // total size of layer files in the current timeline directory
-        let mut total_physical_size = 0;
-
-        for direntry in fs::read_dir(timeline_path)? {
-            let direntry = direntry?;
-            let fname = direntry.file_name();
-            let fname = fname.to_string_lossy();
-
-            if ImageFileName::parse_str(&fname).is_some()
-                || DeltaFileName::parse_str(&fname).is_some()
-            {
-                total_physical_size += direntry.metadata()?.len();
-            }
+    /// The sum of the file size of all historic layers in the layer map.
+    /// This method makes no distinction between local and remote layers.
+    /// Hence, the result **does not represent local filesystem usage**.
+    pub fn layer_size_sum(&self) -> LayerSizeSum {
+        let layer_map = self.layers.read().unwrap();
+        let mut size = 0;
+        let mut no_size_cnt = 0;
+        for l in layer_map.iter_historic_layers() {
+            let (l_size, l_no_size) = l.file_size().map(|s| (s, 0)).unwrap_or((0, 1));
+            size += l_size;
+            no_size_cnt += l_no_size;
         }
-
-        Ok(total_physical_size)
+        if no_size_cnt == 0 {
+            LayerSizeSum::Accurate(size)
+        } else {
+            LayerSizeSum::ApproximateLowerBound(size)
+        }
     }
 
     ///
@@ -954,11 +966,18 @@ impl Timeline {
                     continue;
                 }
 
-                let layer =
-                    ImageLayer::new(self.conf, self.timeline_id, self.tenant_id, &imgfilename);
+                let file_size = direntry_path.metadata()?.len();
+
+                let layer = ImageLayer::new(
+                    self.conf,
+                    self.timeline_id,
+                    self.tenant_id,
+                    &imgfilename,
+                    file_size,
+                );
 
                 trace!("found layer {}", layer.path().display());
-                total_physical_size += layer.path().metadata()?.len();
+                total_physical_size += file_size;
                 layers.insert_historic(Arc::new(layer));
                 num_layers += 1;
             } else if let Some(deltafilename) = DeltaFileName::parse_str(&fname) {
@@ -978,11 +997,18 @@ impl Timeline {
                     continue;
                 }
 
-                let layer =
-                    DeltaLayer::new(self.conf, self.timeline_id, self.tenant_id, &deltafilename);
+                let file_size = direntry_path.metadata()?.len();
+
+                let layer = DeltaLayer::new(
+                    self.conf,
+                    self.timeline_id,
+                    self.tenant_id,
+                    &deltafilename,
+                    file_size,
+                );
 
                 trace!("found layer {}", layer.path().display());
-                total_physical_size += layer.path().metadata()?.len();
+                total_physical_size += file_size;
                 layers.insert_historic(Arc::new(layer));
                 num_layers += 1;
             } else if fname == METADATA_FILE_NAME || fname.ends_with(".old") {
@@ -1111,11 +1137,9 @@ impl Timeline {
                         imgfilename,
                         &remote_layer_metadata,
                     );
+                    let remote_layer = Arc::new(remote_layer);
 
-                    self.layers
-                        .write()
-                        .unwrap()
-                        .insert_historic(Arc::new(remote_layer));
+                    self.layers.write().unwrap().insert_historic(remote_layer);
                 }
                 LayerFileName::Delta(deltafilename) => {
                     // Create a RemoteLayer for the delta file.
@@ -1137,11 +1161,8 @@ impl Timeline {
                         deltafilename,
                         &remote_layer_metadata,
                     );
-
-                    self.layers
-                        .write()
-                        .unwrap()
-                        .insert_historic(Arc::new(remote_layer));
+                    let remote_layer = Arc::new(remote_layer);
+                    self.layers.write().unwrap().insert_historic(remote_layer);
                 }
                 #[cfg(test)]
                 LayerFileName::Test(_) => unreachable!(),
@@ -3010,7 +3031,7 @@ impl Timeline {
 
                     // Download complete. Replace the RemoteLayer with the corresponding
                     // Delta- or ImageLayer in the layer map.
-                    let new_layer = remote_layer.create_downloaded_layer(self.conf);
+                    let new_layer = remote_layer.create_downloaded_layer(self.conf, *size);
                     let mut layers = self.layers.write().unwrap();
                     {
                         let l: Arc<dyn PersistentLayer> = remote_layer.clone();

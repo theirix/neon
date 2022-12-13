@@ -83,7 +83,6 @@ fn check_permission(request: &Request<Body>, tenant_id: Option<TenantId>) -> Res
 async fn build_timeline_info(
     timeline: &Arc<Timeline>,
     include_non_incremental_logical_size: bool,
-    include_non_incremental_physical_size: bool,
 ) -> anyhow::Result<TimelineInfo> {
     let mut info = build_timeline_info_common(timeline)?;
     if include_non_incremental_logical_size {
@@ -98,10 +97,6 @@ async fn build_timeline_info(
                 )
                 .await?,
         );
-    }
-    if include_non_incremental_physical_size {
-        info.current_physical_size_non_incremental =
-            Some(timeline.get_physical_size_non_incremental()?)
     }
     Ok(info)
 }
@@ -133,7 +128,7 @@ fn build_timeline_info_common(timeline: &Arc<Timeline>) -> anyhow::Result<Timeli
             None
         }
     };
-    let current_physical_size = Some(timeline.get_physical_size());
+    let current_physical_size = Some(timeline.layer_size_sum().approximate_is_ok());
     let state = timeline.current_state();
     let remote_consistent_lsn = timeline.get_remote_consistent_lsn().unwrap_or(Lsn(0));
 
@@ -150,7 +145,7 @@ fn build_timeline_info_common(timeline: &Arc<Timeline>) -> anyhow::Result<Timeli
         current_logical_size,
         current_physical_size,
         current_logical_size_non_incremental: None,
-        current_physical_size_non_incremental: None,
+        timeline_dir_layer_file_size_sum: None,
         wal_source_connstr,
         last_received_msg_lsn,
         last_received_msg_ts,
@@ -203,8 +198,6 @@ async fn timeline_list_handler(request: Request<Body>) -> Result<Response<Body>,
     let tenant_id: TenantId = parse_request_param(&request, "tenant_id")?;
     let include_non_incremental_logical_size =
         query_param_present(&request, "include-non-incremental-logical-size");
-    let include_non_incremental_physical_size =
-        query_param_present(&request, "include-non-incremental-physical-size");
     check_permission(&request, Some(tenant_id))?;
 
     let response_data = async {
@@ -215,14 +208,13 @@ async fn timeline_list_handler(request: Request<Body>) -> Result<Response<Body>,
 
         let mut response_data = Vec::with_capacity(timelines.len());
         for timeline in timelines {
-            let timeline_info = build_timeline_info(
-                &timeline,
-                include_non_incremental_logical_size,
-                include_non_incremental_physical_size,
-            )
-            .await
-            .context("Failed to convert tenant timeline {timeline_id} into the local one: {e:?}")
-            .map_err(ApiError::InternalServerError)?;
+            let timeline_info =
+                build_timeline_info(&timeline, include_non_incremental_logical_size)
+                    .await
+                    .context(
+                        "Failed to convert tenant timeline {timeline_id} into the local one: {e:?}",
+                    )
+                    .map_err(ApiError::InternalServerError)?;
 
             response_data.push(timeline_info);
         }
@@ -269,8 +261,6 @@ async fn timeline_detail_handler(request: Request<Body>) -> Result<Response<Body
     let timeline_id: TimelineId = parse_request_param(&request, "timeline_id")?;
     let include_non_incremental_logical_size =
         query_param_present(&request, "include-non-incremental-logical-size");
-    let include_non_incremental_physical_size =
-        query_param_present(&request, "include-non-incremental-physical-size");
     check_permission(&request, Some(tenant_id))?;
 
     let timeline_info = async {
@@ -282,14 +272,10 @@ async fn timeline_detail_handler(request: Request<Body>) -> Result<Response<Body
             .get_timeline(timeline_id, false)
             .map_err(ApiError::NotFound)?;
 
-        let timeline_info = build_timeline_info(
-            &timeline,
-            include_non_incremental_logical_size,
-            include_non_incremental_physical_size,
-        )
-        .await
-        .context("Failed to get local timeline info: {e:#}")
-        .map_err(ApiError::InternalServerError)?;
+        let timeline_info = build_timeline_info(&timeline, include_non_incremental_logical_size)
+            .await
+            .context("Failed to get local timeline info: {e:#}")
+            .map_err(ApiError::InternalServerError)?;
 
         Ok::<_, ApiError>(timeline_info)
     }
@@ -443,7 +429,7 @@ async fn tenant_status(request: Request<Body>) -> Result<Response<Body>, ApiErro
         // Calculate total physical size of all timelines
         let mut current_physical_size = 0;
         for timeline in tenant.list_timelines().iter() {
-            current_physical_size += timeline.get_physical_size();
+            current_physical_size += timeline.layer_size_sum().approximate_is_ok();
         }
 
         let state = tenant.current_state();

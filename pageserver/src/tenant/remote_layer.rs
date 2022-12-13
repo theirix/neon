@@ -185,6 +185,10 @@ impl PersistentLayer for RemoteLayer {
     fn is_remote_layer(&self) -> bool {
         true
     }
+
+    fn file_size(&self) -> Option<u64> {
+        self.layer_metadata.file_size()
+    }
 }
 
 impl RemoteLayer {
@@ -230,6 +234,7 @@ impl RemoteLayer {
     pub fn create_downloaded_layer(
         &self,
         conf: &'static PageServerConf,
+        file_size: u64,
     ) -> Arc<dyn PersistentLayer> {
         if self.is_delta {
             let fname = DeltaFileName {
@@ -241,6 +246,7 @@ impl RemoteLayer {
                 self.timelineid,
                 self.tenantid,
                 &fname,
+                file_size,
             ))
         } else {
             let fname = ImageFileName {
@@ -252,6 +258,7 @@ impl RemoteLayer {
                 self.timelineid,
                 self.tenantid,
                 &fname,
+                file_size,
             ))
         }
     }
