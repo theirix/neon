@@ -162,6 +162,8 @@ pub struct TenantInfo {
     #[serde_as(as = "DisplayFromStr")]
     pub id: TenantId,
     pub state: TenantState,
+    /// Sum of the size of all layer files.
+    /// If a layer is present in both local FS and S3, it counts only once.
     pub current_physical_size: Option<u64>, // physical size is only included in `tenant_status` endpoint
     pub has_in_progress_downloads: Option<bool>,
 }
@@ -190,9 +192,12 @@ pub struct TimelineInfo {
     #[serde_as(as = "DisplayFromStr")]
     pub remote_consistent_lsn: Lsn,
     pub current_logical_size: Option<u64>, // is None when timeline is Unloaded
+    /// Sum of the size of all layer files.
+    /// If a layer is present in both local FS and S3, it counts only once.
     pub current_physical_size: Option<u64>, // is None when timeline is Unloaded
     pub current_logical_size_non_incremental: Option<u64>,
-    pub current_physical_size_non_incremental: Option<u64>,
+
+    pub timeline_dir_layer_file_size_sum: Option<u64>,
 
     pub wal_source_connstr: Option<String>,
     #[serde_as(as = "Option<DisplayFromStr>")]
@@ -217,6 +222,8 @@ pub struct LocalTimelineInfo {
     #[serde_as(as = "Option<DisplayFromStr>")]
     pub ancestor_lsn: Option<Lsn>,
     pub current_logical_size: Option<u64>, // is None when timeline is Unloaded
+    /// Sum of the size of all layer files.
+    /// If a layer is present in both local FS and S3, it counts only once.
     pub current_physical_size: Option<u64>, // is None when timeline is Unloaded
 }
 

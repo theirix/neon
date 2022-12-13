@@ -1152,8 +1152,22 @@ class PageserverHttpClient(requests.Session):
         # there are no tests for those right now.
         return size
 
-    def timeline_list(self, tenant_id: TenantId) -> List[Dict[str, Any]]:
-        res = self.get(f"http://localhost:{self.port}/v1/tenant/{tenant_id}/timeline")
+    def timeline_list(
+        self,
+        tenant_id: TenantId,
+        include_non_incremental_logical_size: bool = False,
+        include_timeline_dir_layer_file_size_sum: bool = False,
+    ) -> List[Dict[str, Any]]:
+
+        params = {}
+        if include_non_incremental_logical_size:
+            params["include-non-incremental-logical-size"] = "yes"
+        if include_timeline_dir_layer_file_size_sum:
+            params["include-timeline-dir-layer-file-size-sum"] = "yes"
+
+        res = self.get(
+            f"http://localhost:{self.port}/v1/tenant/{tenant_id}/timeline", params=params
+        )
         self.verbose_error(res)
         res_json = res.json()
         assert isinstance(res_json, list)
@@ -1187,13 +1201,13 @@ class PageserverHttpClient(requests.Session):
         tenant_id: TenantId,
         timeline_id: TimelineId,
         include_non_incremental_logical_size: bool = False,
-        include_non_incremental_physical_size: bool = False,
+        include_timeline_dir_layer_file_size_sum: bool = False,
     ) -> Dict[Any, Any]:
         params = {}
         if include_non_incremental_logical_size:
             params["include-non-incremental-logical-size"] = "yes"
-        if include_non_incremental_physical_size:
-            params["include-non-incremental-physical-size"] = "yes"
+        if include_timeline_dir_layer_file_size_sum:
+            params["include-timeline-dir-layer-file-size-sum"] = "yes"
 
         res = self.get(
             f"http://localhost:{self.port}/v1/tenant/{tenant_id}/timeline/{timeline_id}",
