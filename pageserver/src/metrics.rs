@@ -96,6 +96,16 @@ static CURRENT_PHYSICAL_SIZE: Lazy<UIntGaugeVec> = Lazy::new(|| {
     .expect("failed to define a metric")
 });
 
+#[cfg(not(test))]
+pub(crate) static REMOTE_PHYSICAL_SIZE: Lazy<UIntGaugeVec> = Lazy::new(|| {
+    register_uint_gauge_vec!(
+        "pageserver_remote_physical_size",
+        "The space of the tenant's / timeline's layer files in the object store.",
+        &["tenant_id", "timeline_id"]
+    )
+    .expect("failed to define a metric")
+});
+
 static CURRENT_LOGICAL_SIZE: Lazy<UIntGaugeVec> = Lazy::new(|| {
     register_uint_gauge_vec!(
         "pageserver_current_logical_size",

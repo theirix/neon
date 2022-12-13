@@ -206,6 +206,9 @@ mod upload;
 // re-export these
 pub use download::{is_temp_download_file, list_remote_timelines};
 
+#[cfg(not(test))]
+use ::metrics::UIntGauge;
+
 use std::collections::{HashMap, VecDeque};
 use std::fmt::Debug;
 use std::ops::DerefMut;
@@ -267,6 +270,9 @@ pub struct RemoteTimelineClient {
     timeline_id: TimelineId,
 
     upload_queue: Mutex<UploadQueue>,
+
+    #[cfg(not(test))]
+    remote_physical_size_gauge: UIntGauge,
 
     storage_impl: GenericRemoteStorage,
 }
@@ -439,11 +445,22 @@ enum UploadOp {
     /// Upload the metadata file
     UploadMetadata(IndexPart, Lsn),
 
-    /// Delete a file.
-    Delete(RemoteOpFileKind, LayerFileName),
+    /// Delete a file. Right now, this is only used for layer files.
+    Delete(RemoteOpFileKind, LayerFileName, LayerFileMetadata),
 
     /// Barrier. When the barrier operation is reached,
     Barrier(tokio::sync::watch::Sender<()>),
+}
+
+impl UploadOp {
+    fn get_layer_file_name(&self) -> Option<&LayerFileName> {
+        Some(match self {
+            UploadOp::UploadLayer(n, _) => n,
+            UploadOp::Delete(_, n, _) => n,
+            UploadOp::UploadMetadata(_, _) => return None,
+            UploadOp::Barrier(_) => return None,
+        })
+    }
 }
 
 impl std::fmt::Display for UploadOp {
@@ -458,7 +475,7 @@ impl std::fmt::Display for UploadOp {
                 )
             }
             UploadOp::UploadMetadata(_, lsn) => write!(f, "UploadMetadata(lsn: {})", lsn),
-            UploadOp::Delete(_, path) => write!(f, "Delete({})", path.file_name()),
+            UploadOp::Delete(_, path, _) => write!(f, "Delete({})", path.file_name()),
             UploadOp::Barrier(_) => write!(f, "Barrier"),
         }
     }
@@ -471,6 +488,22 @@ impl RemoteTimelineClient {
     pub fn init_upload_queue(&self, index_part: &IndexPart) -> anyhow::Result<()> {
         let mut upload_queue = self.upload_queue.lock().unwrap();
         upload_queue.initialize_with_current_remote_index_part(index_part)?;
+
+        // If we don't have the file size for the layer, don't account for it in the metric.
+        // The delete is careful to do the same.
+        // When lazy-updating the size upon download, we will do the accounting.
+        #[cfg(not(test))]
+        {
+            let size: u64 = upload_queue
+                .initialized_mut()
+                .expect("we just initialized it")
+                .latest_files
+                .iter()
+                .map(|(_, lmd)| lmd.file_size().unwrap_or(0))
+                .sum();
+            self.remote_physical_size_gauge.set(size);
+        }
+
         Ok(())
     }
 
@@ -482,6 +515,10 @@ impl RemoteTimelineClient {
     ) -> anyhow::Result<()> {
         let mut upload_queue = self.upload_queue.lock().unwrap();
         upload_queue.initialize_empty_remote(local_metadata)?;
+
+        #[cfg(not(test))]
+        self.remote_physical_size_gauge.set(0);
+
         Ok(())
     }
 
@@ -552,6 +589,9 @@ impl RemoteTimelineClient {
             let upload_queue = guard.initialized_mut()?;
             if let Some(upgraded) = upload_queue.latest_files.get_mut(layer_file_name) {
                 upgraded.merge(&new_metadata);
+                // We didn't account for this when we initialized the upload queue.
+                #[cfg(not(test))]
+                self.remote_physical_size_gauge.add(downloaded_size);
             } else {
                 // The file should exist, since we just downloaded it.
                 warn!(
@@ -661,6 +701,25 @@ impl RemoteTimelineClient {
         let metadata_bytes = upload_queue.latest_metadata.to_bytes()?;
         let disk_consistent_lsn = upload_queue.latest_metadata.disk_consistent_lsn();
 
+        for name in names {
+            if !upload_queue.latest_files.contains_key(name) {
+                anyhow::bail!(
+                    "name {} not found in upload_queue.latest_files",
+                    name.file_name()
+                );
+            }
+        }
+        let mut delete_ops = Vec::with_capacity(names.len());
+        for name in names {
+            let metadata = upload_queue
+                .latest_files
+                .remove(name)
+                // XXX assert uniqueness of names
+                .expect("we just checked above");
+            let op = UploadOp::Delete(RemoteOpFileKind::Layer, name.clone(), metadata);
+            delete_ops.push(op);
+        }
+
         // Update the remote index file, removing the to-be-deleted files from the index,
         // before deleting the actual files.
         //
@@ -669,10 +728,6 @@ impl RemoteTimelineClient {
         // from latest_files, but not yet scheduled for deletion. Use a closure
         // to syntactically forbid ? or bail! calls here.
         let no_bail_here = || {
-            for name in names {
-                upload_queue.latest_files.remove(name);
-            }
-
             let index_part = IndexPart::new(
                 upload_queue.latest_files.clone(),
                 disk_consistent_lsn,
@@ -683,11 +738,15 @@ impl RemoteTimelineClient {
             upload_queue.queued_operations.push_back(op);
 
             // schedule the actual deletions
-            for name in names {
-                let op = UploadOp::Delete(RemoteOpFileKind::Layer, name.clone());
+            for op in delete_ops {
+                info!(
+                    "scheduled layer file deletion {}",
+                    op.get_layer_file_name()
+                        .expect("we know it's a delete op")
+                        .file_name()
+                );
                 self.update_upload_queue_unfinished_metric(1, &op);
                 upload_queue.queued_operations.push_back(op);
-                info!("scheduled layer file deletion {}", name.file_name());
             }
 
             // Launch the tasks immediately, if possible
@@ -738,7 +797,7 @@ impl RemoteTimelineClient {
                     // have finished.
                     upload_queue.inprogress_tasks.is_empty()
                 }
-                UploadOp::Delete(_, _) => {
+                UploadOp::Delete(_, _, _) => {
                     // Wait for preceding uploads to finish. Concurrent deletions are OK, though.
                     upload_queue.num_inprogress_deletions == upload_queue.inprogress_tasks.len()
                 }
@@ -769,7 +828,7 @@ impl RemoteTimelineClient {
                 UploadOp::UploadMetadata(_, _) => {
                     upload_queue.num_inprogress_metadata_uploads += 1;
                 }
-                UploadOp::Delete(_, _) => {
+                UploadOp::Delete(_, _, _) => {
                     upload_queue.num_inprogress_deletions += 1;
                 }
                 UploadOp::Barrier(sender) => {
@@ -848,7 +907,7 @@ impl RemoteTimelineClient {
                         .conf
                         .timeline_path(&self.timeline_id, &self.tenant_id)
                         .join(layer_file_name.file_name());
-                    upload::upload_timeline_layer(
+                    let res = upload::upload_timeline_layer(
                         self.conf,
                         &self.storage_impl,
                         path,
@@ -860,7 +919,15 @@ impl RemoteTimelineClient {
                         RemoteOpFileKind::Layer,
                         RemoteOpKind::Upload,
                     )
-                    .await
+                    .await;
+                    #[cfg(not(test))]
+                    if res.is_ok() {
+                        let size = layer_metadata
+                            .file_size()
+                            .expect("we only admit ops that have file_size in metadata");
+                        self.remote_physical_size_gauge.add(size);
+                    }
+                    res
                 }
                 UploadOp::UploadMetadata(ref index_part, _lsn) => {
                     upload::upload_index_part(
@@ -878,19 +945,33 @@ impl RemoteTimelineClient {
                     )
                     .await
                 }
-                UploadOp::Delete(metric_file_kind, ref layer_file_name) => {
+                UploadOp::Delete(metric_file_kind, ref layer_file_name, ref _metadata) => {
                     let path = &self
                         .conf
                         .timeline_path(&self.timeline_id, &self.tenant_id)
                         .join(layer_file_name.file_name());
-                    delete::delete_layer(self.conf, &self.storage_impl, path)
+                    let res = delete::delete_layer(self.conf, &self.storage_impl, path)
                         .measure_remote_op(
                             self.tenant_id,
                             self.timeline_id,
                             *metric_file_kind,
                             RemoteOpKind::Delete,
                         )
-                        .await
+                        .await;
+                    #[cfg(not(test))]
+                    if res.is_ok() {
+                        match metric_file_kind {
+                            RemoteOpFileKind::Layer => {
+                                // If file_size() is None, then we didn't .add() to the metric before either.
+                                let file_size = _metadata.file_size().unwrap_or(0);
+                                self.remote_physical_size_gauge.sub(file_size);
+                            }
+                            RemoteOpFileKind::Index => {
+                                // we don't track the index file sizes in any metric
+                            }
+                        }
+                    }
+                    res
                 }
                 UploadOp::Barrier(_) => {
                     // unreachable. Barrier operations are handled synchronously in
@@ -967,7 +1048,7 @@ impl RemoteTimelineClient {
                     upload_queue.num_inprogress_metadata_uploads -= 1;
                     upload_queue.last_uploaded_consistent_lsn = lsn; // XXX monotonicity check?
                 }
-                UploadOp::Delete(_, _) => {
+                UploadOp::Delete(_, _, _) => {
                     upload_queue.num_inprogress_deletions -= 1;
                 }
                 UploadOp::Barrier(_) => unreachable!(),
@@ -983,7 +1064,7 @@ impl RemoteTimelineClient {
         let (file_kind, op_kind) = match op {
             UploadOp::UploadLayer(_, _) => (RemoteOpFileKind::Layer, RemoteOpKind::Upload),
             UploadOp::UploadMetadata(_, _) => (RemoteOpFileKind::Index, RemoteOpKind::Upload),
-            UploadOp::Delete(file_kind, _) => (*file_kind, RemoteOpKind::Delete),
+            UploadOp::Delete(file_kind, _, _) => (*file_kind, RemoteOpKind::Delete),
             UploadOp::Barrier(_) => {
                 // we do not account these
                 return;
@@ -1080,6 +1161,10 @@ pub fn create_remote_timeline_client(
         timeline_id,
         storage_impl: remote_storage,
         upload_queue: Mutex::new(UploadQueue::Uninitialized),
+        #[cfg(not(test))]
+        remote_physical_size_gauge: crate::metrics::REMOTE_PHYSICAL_SIZE
+            .get_metric_with_label_values(&[&tenant_id.to_string(), &timeline_id.to_string()])
+            .unwrap(),
     })
 }
 
