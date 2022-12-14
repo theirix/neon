@@ -27,6 +27,7 @@ import backoff  # type: ignore
 import boto3
 import jwt
 import psycopg2
+import prometheus_client
 import pytest
 import requests
 from _pytest.config import Config
@@ -1336,6 +1337,20 @@ class PageserverHttpClient(requests.Session):
             return None
         assert len(relevant) == 1
         return relevant[0].lstrip(name).strip()
+
+    def get_timeline_metric(self, tenant_id: TenantId, timeline_id: TimelineId, metric_name: str):
+        raw = self.get_metrics()
+        family: List[prometheus_client.Metric] = list(
+            prometheus_client.parser.text_string_to_metric_families(raw)
+        )
+        [metric] = [m for m in family if m.name == metric_name]
+        [sample] = [
+            s
+            for s in metric.samples
+            if s.labels["tenant_id"] == str(tenant_id)
+            and s.labels["timeline_id"] == str(timeline_id)
+        ]
+        return sample.value
 
 
 @dataclass
