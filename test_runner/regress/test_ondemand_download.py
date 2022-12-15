@@ -1,10 +1,8 @@
 # It's possible to run any regular test with the local fs remote storage via
 # env ZENITH_PAGESERVER_OVERRIDES="remote_storage={local_path='/tmp/neon_zzz/'}" poetry ......
 
-import os
-import shutil
-from pathlib import Path
 import time
+from pathlib import Path
 
 import pytest
 from fixtures.log_helper import log
@@ -203,12 +201,20 @@ def test_ondemand_download_timetravel(
         tenant_id, timeline_id, env.safekeepers, env.pageserver
     )
 
-    def get_physical_size():
+    def get_api_current_physical_size():
         d = client.timeline_detail(tenant_id, timeline_id)
         return d["current_physical_size"]
 
-    filled_size = get_physical_size()
-    log.info(f"filled_size={filled_size}")
+    def get_resident_physical_size():
+        return client.get_timeline_metric(
+            tenant_id, timeline_id, "pageserver_resident_physical_size"
+        )
+
+    filled_current_physical = get_api_current_physical_size()
+    log.info(filled_current_physical)
+    filled_size = get_resident_physical_size()
+    log.info(filled_size)
+    assert filled_current_physical == filled_size, "we don't yet do layer eviction"
 
     env.pageserver.stop()
 
@@ -222,8 +228,11 @@ def test_ondemand_download_timetravel(
 
     wait_until(10, 0.2, lambda: assert_tenant_status(client, tenant_id, "Active"))
 
+    # current_physical_size reports sum of layer file sizes, regardless of local or remote
+    assert filled_current_physical == get_api_current_physical_size()
+
     num_layers_downloaded = [0]
-    physical_size = [get_physical_size()]
+    physical_size = [get_resident_physical_size()]
     for (checkpoint_number, lsn) in lsns:
         pg_old = env.postgres.create_start(
             branch_name="main", node_name=f"test_old_lsn_{checkpoint_number}", lsn=lsn
@@ -261,10 +270,13 @@ def test_ondemand_download_timetravel(
             assert after_downloads > num_layers_downloaded[len(num_layers_downloaded) - 4]
 
         # Likewise, assert that the physical_size metric grows as layers are downloaded
-        physical_size.append(get_physical_size())
+        physical_size.append(get_resident_physical_size())
         log.info(f"physical_size[-1]={physical_size[-1]}")
         if len(physical_size) > 4:
             assert physical_size[-1] > physical_size[len(physical_size) - 4]
+
+        # current_physical_size reports sum of layer file sizes, regardless of local or remote
+        assert filled_current_physical == get_api_current_physical_size()
 
 
 #
@@ -324,9 +336,12 @@ def test_download_remote_layers_api(
 
     def get_api_current_physical_size():
         d = client.timeline_detail(tenant_id, timeline_id)
-        return  d["current_physical_size"]
+        return d["current_physical_size"]
+
     def get_resident_physical_size():
-        return client.get_timeline_metric(tenant_id, timeline_id, "pageserver_resident_physical_size")
+        return client.get_timeline_metric(
+            tenant_id, timeline_id, "pageserver_resident_physical_size"
+        )
 
     filled_current_physical = get_api_current_physical_size()
     log.info(filled_current_physical)
@@ -353,7 +368,7 @@ def test_download_remote_layers_api(
     env.pageserver.start()
 
     wait_until(10, 0.2, lambda: assert_tenant_status(client, tenant_id, "Active"))
-    
+
     ###### Phase 1: exercise download error code path
     # activate failpoint now, then get post_unlink_size so that it's stable
     client.configure_failpoints(("remote-storage-download-pre-rename", "return"))
@@ -366,10 +381,14 @@ def test_download_remote_layers_api(
     # wait for in-progress downloads to hit the failpoint
     time.sleep(1)
 
-    assert filled_current_physical == get_api_current_physical_size(), "current_physical_size is sum of loaded layer sizes, independent of whether local or remote"
+    assert (
+        filled_current_physical == get_api_current_physical_size()
+    ), "current_physical_size is sum of loaded layer sizes, independent of whether local or remote"
     post_unlink_size = get_resident_physical_size()
     log.info(post_unlink_size)
-    assert post_unlink_size < filled_size, "we just deleted layers and didn't cause anything to re-download them yet"
+    assert (
+        post_unlink_size < filled_size
+    ), "we just deleted layers and didn't cause anything to re-download them yet"
     assert filled_size - post_unlink_size > 5 * (
         1024**2
     ), "we may be downloading some layers as part of tenant activation"
@@ -386,8 +405,10 @@ def test_download_remote_layers_api(
     assert (
         info["failed_download_count"] > 0
     )  # can't assert == total_layer_count because attach + tenant status downloads some layers
-    assert get_api_current_physical_size() == filled_current_physical 
-    assert get_resident_physical_size() == post_unlink_size, "didn't download anything new due to failpoint"
+    assert get_api_current_physical_size() == filled_current_physical
+    assert (
+        get_resident_physical_size() == post_unlink_size
+    ), "didn't download anything new due to failpoint"
     # would be nice to assert that the layers in the layer map are still RemoteLayer
 
     ##### Retry, this time without failpoints
@@ -405,7 +426,7 @@ def test_download_remote_layers_api(
     log.info(refilled_size)
 
     assert filled_size == refilled_size, "we redownloaded all the layers"
-    assert get_api_current_physical_size() == filled_current_physical 
+    assert get_api_current_physical_size() == filled_current_physical
 
     for sk in env.safekeepers:
         sk.start()
