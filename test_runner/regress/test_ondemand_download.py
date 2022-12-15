@@ -97,14 +97,13 @@ def test_ondemand_download_large_rel(
     pg.stop()
     env.pageserver.stop()
 
-    dir_to_clear = Path(env.repo_dir) / "tenants"
-    shutil.rmtree(dir_to_clear)
-    os.mkdir(dir_to_clear)
+    # remove all the layer files
+    for layer in (Path(env.repo_dir) / "tenants").glob("*/timelines/*/*-*_*"):
+        log.info(f"unlinking layer {layer}")
+        layer.unlink()
 
     ##### Second start, restore the data and ensure it's the same
     env.pageserver.start()
-
-    client.tenant_attach(tenant_id)
 
     pg.start()
     before_downloads = get_num_downloaded_layers(client, tenant_id, timeline_id)
@@ -212,14 +211,13 @@ def test_ondemand_download_timetravel(
 
     env.pageserver.stop()
 
-    dir_to_clear = Path(env.repo_dir) / "tenants"
-    shutil.rmtree(dir_to_clear)
-    os.mkdir(dir_to_clear)
+    # remove all the layer files
+    for layer in (Path(env.repo_dir) / "tenants").glob("*/timelines/*/*-*_*"):
+        log.info(f"unlinking layer {layer}")
+        layer.unlink()
 
     ##### Second start, restore the data and ensure it's the same
     env.pageserver.start()
-
-    client.tenant_attach(tenant_id)
 
     wait_until(10, 0.2, lambda: assert_tenant_status(client, tenant_id, "Active"))
 
@@ -332,22 +330,21 @@ def test_download_remote_layers_api(
 
     env.pageserver.stop()
 
+    # remove all the layer files
     # XXX only delete some of the layer files, to show that it really just downloads all the layers
-    dir_to_clear = Path(env.repo_dir) / "tenants"
-    shutil.rmtree(dir_to_clear)
-    os.mkdir(dir_to_clear)
+    for layer in (Path(env.repo_dir) / "tenants").glob("*/timelines/*/*-*_*"):
+        log.info(f"unlinking layer {layer}")
+        layer.unlink()
 
-    ##### Second start, restore the data and ensure it's the same
-    env.pageserver.start()
-
-    # Shut down safekeepers before attaching the tenant.
+    # Shut down safekeepers before starting the pageserver.
     # If we don't, the tenant's walreceiver handler will trigger the
     # the logical size computation task, and that downloads layes,
     # which makes our assertions on size fail.
     for sk in env.safekeepers:
         sk.stop(immediate=True)
 
-    client.tenant_attach(tenant_id)
+    ##### Second start, restore the data and ensure it's the same
+    env.pageserver.start()
 
     wait_until(10, 0.2, lambda: assert_tenant_status(client, tenant_id, "Active"))
 
