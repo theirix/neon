@@ -1114,7 +1114,7 @@ impl Timeline {
             }
 
             info!(
-                "remote layer does not exist locally, downloading it now: {}",
+                "remote layer does not exist locally, creating remote layer: {}",
                 remote_layer_name.file_name()
             );
 
