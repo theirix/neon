@@ -4,6 +4,7 @@
 import os
 import shutil
 from pathlib import Path
+import time
 
 import pytest
 from fixtures.log_helper import log
@@ -321,12 +322,17 @@ def test_download_remote_layers_api(
         tenant_id, timeline_id, env.safekeepers, env.pageserver
     )
 
-    def get_physical_size():
+    def get_api_current_physical_size():
         d = client.timeline_detail(tenant_id, timeline_id)
-        return d["current_physical_size"]
+        return  d["current_physical_size"]
+    def get_resident_physical_size():
+        return client.get_timeline_metric(tenant_id, timeline_id, "pageserver_resident_physical_size")
 
-    filled_size = get_physical_size()
-    log.info(f"filled_size={filled_size}")
+    filled_current_physical = get_api_current_physical_size()
+    log.info(filled_current_physical)
+    filled_size = get_resident_physical_size()
+    log.info(filled_size)
+    assert filled_current_physical == filled_size, "we don't yet do layer eviction"
 
     env.pageserver.stop()
 
@@ -347,16 +353,9 @@ def test_download_remote_layers_api(
     env.pageserver.start()
 
     wait_until(10, 0.2, lambda: assert_tenant_status(client, tenant_id, "Active"))
-
-    attached_size = get_physical_size()
-    log.info(f"attached_size={attached_size}")
-    assert attached_size < filled_size
-    assert filled_size - attached_size > 5 * (
-        1024**2
-    ), "at least a few layers must have been deleted"
-
+    
     ###### Phase 1: exercise download error code path
-
+    # activate failpoint now, then get post_unlink_size so that it's stable
     client.configure_failpoints(("remote-storage-download-pre-rename", "return"))
     env.pageserver.allowed_errors.extend(
         [
@@ -364,7 +363,18 @@ def test_download_remote_layers_api(
             f".*initial size calculation.*{tenant_id}.*{timeline_id}.*Failed to calculate logical size",
         ]
     )
+    # wait for in-progress downloads to hit the failpoint
+    time.sleep(1)
 
+    assert filled_current_physical == get_api_current_physical_size(), "current_physical_size is sum of loaded layer sizes, independent of whether local or remote"
+    post_unlink_size = get_resident_physical_size()
+    log.info(post_unlink_size)
+    assert post_unlink_size < filled_size, "we just deleted layers and didn't cause anything to re-download them yet"
+    assert filled_size - post_unlink_size > 5 * (
+        1024**2
+    ), "we may be downloading some layers as part of tenant activation"
+
+    # issue downloads that we know will fail
     info = client.timeline_download_remote_layers(
         tenant_id, timeline_id, errors_ok=True, at_least_one_download=False
     )
@@ -376,7 +386,8 @@ def test_download_remote_layers_api(
     assert (
         info["failed_download_count"] > 0
     )  # can't assert == total_layer_count because attach + tenant status downloads some layers
-    assert get_physical_size() == attached_size
+    assert get_api_current_physical_size() == filled_current_physical 
+    assert get_resident_physical_size() == post_unlink_size, "didn't download anything new due to failpoint"
     # would be nice to assert that the layers in the layer map are still RemoteLayer
 
     ##### Retry, this time without failpoints
@@ -390,10 +401,11 @@ def test_download_remote_layers_api(
     assert info["successful_download_count"] > 0
     assert info["failed_download_count"] == 0
 
-    refilled_size = get_physical_size()
-    log.info(f"refilled_size={refilled_size}")
+    refilled_size = get_resident_physical_size()
+    log.info(refilled_size)
 
-    assert filled_size == refilled_size
+    assert filled_size == refilled_size, "we redownloaded all the layers"
+    assert get_api_current_physical_size() == filled_current_physical 
 
     for sk in env.safekeepers:
         sk.start()
