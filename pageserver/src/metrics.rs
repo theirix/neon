@@ -143,8 +143,9 @@ const STORAGE_IO_TIME_BUCKETS: &[f64] = &[
     1.0,      // 1 sec
 ];
 
-const STORAGE_IO_TIME_OPERATIONS: &[&str] =
-    &["open", "close", "read", "write", "seek", "fsync", "gc", "metadata"];
+const STORAGE_IO_TIME_OPERATIONS: &[&str] = &[
+    "open", "close", "read", "write", "seek", "fsync", "gc", "metadata",
+];
 
 const STORAGE_IO_SIZE_OPERATIONS: &[&str] = &["read", "write"];
 
