@@ -3165,12 +3165,24 @@ where
     T: Send,
 {
     loop {
-        let result = f();
-        let future = match result {
+        let download_fut = match f() {
+            Ok(v) => return Ok(v),
             Err(PageReconstructError::NeedDownload(future)) => future,
-            _ => return Ok(result?),
+            Err(e) => return Err(anyhow::Error::new(e)),
         };
-        future.await?;
+        debug!("closure failed because it needs a download, starting that now");
+        let download_result = download_fut.await;
+        match download_result {
+            Ok(_) => {
+                debug!("download succeeded, retrying closure");
+            }
+            Err(e) => {
+                error!(
+                    "closure failed because it needs download but download failed, retrying: {e:?}"
+                );
+                // Don't do exponential back-off here, that happens inside download_remote_layer
+            }
+        }
     }
 }
 
