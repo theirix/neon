@@ -12,13 +12,10 @@
 //!
 
 use anyhow::{bail, Context};
-use bytes::Bytes;
-use futures::Stream;
 use pageserver_api::models::TimelineState;
 use remote_storage::DownloadError;
 use remote_storage::GenericRemoteStorage;
 use tokio::sync::watch;
-use tokio_util::io::StreamReader;
 use tokio_util::io::SyncIoBridge;
 use tracing::*;
 use utils::crashsafe::path_with_suffix_extension;
@@ -233,7 +230,7 @@ impl UninitializedTimeline<'_> {
     /// Prepares timeline data by loading it from the basebackup archive.
     pub async fn import_basebackup_from_tar(
         self,
-        mut copyin_stream: &mut Pin<&mut impl Stream<Item = io::Result<Bytes>>>,
+        copyin_read: &mut Pin<&mut impl tokio::io::AsyncRead>,
         base_lsn: Lsn,
     ) -> anyhow::Result<Arc<Timeline>> {
         let raw_timeline = self.raw_timeline()?;
@@ -242,7 +239,7 @@ impl UninitializedTimeline<'_> {
         // it uses is not async. So we need to jump through some hoops:
         // - convert the input from client connection to a synchronous Read
         // - use block_in_place()
-        let reader = SyncIoBridge::new(StreamReader::new(&mut copyin_stream));
+        let reader = SyncIoBridge::new(copyin_read);
 
         tokio::task::block_in_place(|| {
             import_datadir::import_basebackup_from_tar(raw_timeline, reader, base_lsn)

@@ -107,6 +107,22 @@ fn copyin_stream(pgb: &mut PostgresBackend) -> impl Stream<Item = io::Result<Byt
     }
 }
 
+/// Read all remaining bytes from 'reader', discarding them. Returns the
+/// number of bytes discarded.
+async fn drain_async_read<R: tokio::io::AsyncRead + Unpin>(mut reader: R) -> Result<usize> {
+    let mut buf = [0u8; 1024];
+    let mut total_bytes = 0;
+    loop {
+        use tokio::io::AsyncReadExt;
+        let nbytes = reader.read(&mut buf).await?;
+        total_bytes += nbytes;
+        if nbytes == 0 {
+            break;
+        }
+    }
+    Ok(total_bytes)
+}
+
 ///////////////////////////////////////////////////////////////////////////////
 
 ///
@@ -397,16 +413,15 @@ impl PageServerHandler {
 
         let copyin_stream = copyin_stream(pgb);
         pin!(copyin_stream);
+        let copyin_reader = StreamReader::new(&mut copyin_stream);
+        pin!(copyin_reader);
 
         timeline
-            .import_basebackup_from_tar(&mut copyin_stream, base_lsn)
+            .import_basebackup_from_tar(&mut copyin_reader, base_lsn)
             .await?;
 
-        // Drain the rest of the Copy data
-        let mut bytes_after_tar = 0;
-        while let Some(bytes) = copyin_stream.next().await {
-            bytes_after_tar += bytes?.len();
-        }
+        // There should be no more data after the tar archive in the Copy stream.
+        let bytes_after_tar = drain_async_read(copyin_reader).await?;
         if bytes_after_tar > 0 {
             warn!("ignored {bytes_after_tar} unexpected bytes after the tar archive");
         }
