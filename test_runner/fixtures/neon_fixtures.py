@@ -1937,9 +1937,6 @@ class NeonPageserver(PgProtocol):
             ".*compaction_loop.*Compaction failed, retrying in.*timeline is Stopping",  # When compaction checks timeline state after acquiring layer_removal_cs
             ".*query handler for 'pagestream.*failed: Timeline .* was not found",  # postgres reconnects while timeline_delete doesn't hold the tenant's timelines.lock()
             ".*query handler for 'pagestream.*failed: Timeline .* is not active",  # timeline delete in progress
-            # FIXME: on-demand download causes these, need to triage
-            ".*could not compact, repartitioning keyspace failed: layer file needs to be downloaded",
-            ".*Gc failed, retrying in .*: layer file needs to be downloaded",
         ]
 
     def start(
