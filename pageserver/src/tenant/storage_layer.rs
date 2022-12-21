@@ -175,9 +175,8 @@ pub trait PersistentLayer: Layer {
 
     /// Returns None if the layer file size is not known.
     ///
-    /// Must not change over the lifetime of the layer object because
-    /// resident_physical_size_guage and s3_physical_size_guage are updated
-    /// for RemoteLayer's in response to this value.
+    /// Should not change over the lifetime of the layer object because
+    /// current_physical_size is computed as the som of this value.
     fn file_size(&self) -> Option<u64>;
 }
 
