@@ -63,6 +63,8 @@
 #include "storage/md.h"
 #include "pgstat.h"
 
+#include "neon_lwlc.h"
+
 
 #if PG_VERSION_NUM >= 150000
 #include "access/xlogutils.h"
@@ -98,6 +100,9 @@ char	   *page_server_connstring;
 char	   *neon_timeline;
 char	   *neon_tenant;
 int32		max_cluster_size;
+
+/* Block of 0s for use in xlogging empty pages */
+static PGAlignedBlock zeroblock = {0};
 
 /* unlogged relation build states */
 typedef enum
@@ -266,8 +271,9 @@ static bool prefetch_wait_for(uint64 ring_index);
 static void prefetch_cleanup_trailing_unused(void);
 static inline void prefetch_set_unused(uint64 ring_index);
 
-static XLogRecPtr neon_get_request_lsn(bool *latest, RelFileNode rnode,
-									   ForkNumber forknum, BlockNumber blkno);
+static XLogRecPtr neon_get_page_request_lsn(bool *latest, RelFileNode rnode,
+											ForkNumber forknum, BlockNumber blkno,
+											XLogRecPtr *effective);
 
 static bool
 compact_prefetch_buffers(void)
@@ -332,16 +338,12 @@ compact_prefetch_buffers(void)
 		/* Adjust the location of our known-empty slot */
 		empty_ring_index--;
 
-		source_slot->status = PRFS_UNUSED;
-		source_slot->buftag = (BufferTag) {0};
-		source_slot->response = NULL;
-		source_slot->my_ring_index = 0;
-		source_slot->effective_request_lsn = 0;
+		MemSet(source_slot, 0, sizeof(PrefetchRequest));
 
 		n_moved++;
 	}
 
-	if (MyPState->ring_last != empty_ring_index)
+	if (n_moved > 0)
 	{
 		prefetch_cleanup_trailing_unused();
 		return true;
@@ -648,11 +650,13 @@ prefetch_do_request(PrefetchRequest *slot, bool *force_latest, XLogRecPtr *force
 	}
 	else
 	{
-		XLogRecPtr lsn = neon_get_request_lsn(
+		XLogRecPtr effective_request_lsn;
+		XLogRecPtr lsn = neon_get_page_request_lsn(
 			&request.req.latest,
 			slot->buftag.rnode,
 			slot->buftag.forkNum,
-			slot->buftag.blockNum
+			slot->buftag.blockNum,
+			&effective_request_lsn
 		);
 		/*
 		 * Note: effective_request_lsn is potentially higher than the requested
@@ -673,8 +677,8 @@ prefetch_do_request(PrefetchRequest *slot, bool *force_latest, XLogRecPtr *force
 		 * XLogCtl->Insert.RedoRecPtr, but that's expensive to access.
 		 */
 		request.req.lsn = lsn;
-		prefetch_lsn = Max(prefetch_lsn, lsn);
-		slot->effective_request_lsn = prefetch_lsn;
+		Assert(effective_request_lsn >= lsn);
+		slot->effective_request_lsn = effective_request_lsn;
 	}
 
 	Assert(slot->response == NULL);
@@ -1302,7 +1306,7 @@ neon_wallog_page(SMgrRelation reln, ForkNumber forknum, BlockNumber blocknum, ch
 	 * Remember the LSN on this page. When we read the page again, we must
 	 * read the same or newer version of it.
 	 */
-	SetLastWrittenLSNForBlock(lsn, reln->smgr_rnode.node, forknum, blocknum);
+	neon_set_lwlf_block_hook(lsn, reln->smgr_rnode.node, forknum, blocknum);
 }
 
 /*
@@ -1372,22 +1376,26 @@ nm_adjust_lsn(XLogRecPtr lsn)
  * Return LSN for requesting pages and number of blocks from page server
  */
 static XLogRecPtr
-neon_get_request_lsn(bool *latest, RelFileNode rnode, ForkNumber forknum, BlockNumber blkno)
+neon_get_page_request_lsn(bool *latest, RelFileNode rnode, ForkNumber forknum,
+						  BlockNumber blkno, XLogRecPtr *effective)
 {
 	XLogRecPtr	lsn;
+	XLogRecPtr	local_effective;
 
 	if (RecoveryInProgress())
 	{
 		*latest = false;
 		lsn = GetXLogReplayRecPtr(NULL);
-		elog(DEBUG1, "neon_get_request_lsn GetXLogReplayRecPtr %X/%X request lsn 0 ",
+		local_effective = lsn;
+		elog(DEBUG1, "neon_get_page_request_lsn GetXLogReplayRecPtr %X/%X request lsn 0 ",
 			 (uint32) ((lsn) >> 32), (uint32) (lsn));
 	}
 	else if (am_walsender)
 	{
 		*latest = true;
 		lsn = InvalidXLogRecPtr;
-		elog(DEBUG1, "am walsender neon_get_request_lsn lsn 0 ");
+		local_effective = lsn;
+		elog(DEBUG1, "am walsender neon_get_page_request_lsn lsn 0 ");
 	}
 	else
 	{
@@ -1399,9 +1407,133 @@ neon_get_request_lsn(bool *latest, RelFileNode rnode, ForkNumber forknum, BlockN
 		 * so our request cannot concern those.
 		 */
 		*latest = true;
-		lsn = GetLastWrittenLSN(rnode, forknum, blkno);
-		Assert(lsn != InvalidXLogRecPtr);
-		elog(DEBUG1, "neon_get_request_lsn GetLastWrittenLSN lsn %X/%X ",
+		lsn = GetLastWrittenLsnForBuffer(rnode, forknum, blkno, &local_effective);
+		Assert(lsn != InvalidXLogRecPtr || lsn_cache_size <= 0);
+		elog(DEBUG1, "neon_get_page_request_lsn GetLastWrittenLSN lsn %X/%X ",
+			 (uint32) ((lsn) >> 32), (uint32) (lsn));
+
+		lsn = nm_adjust_lsn(lsn);
+		local_effective = nm_adjust_lsn(local_effective);
+
+		/*
+		 * Is it possible that the last-written LSN is ahead of last flush
+		 * LSN? Generally not, we shouldn't evict a page from the buffer cache
+		 * before all its modifications have been safely flushed. That's the
+		 * "WAL before data" rule. However, such case does exist at index
+		 * building, _bt_blwritepage logs the full page without flushing WAL
+		 * before smgrextend (files are fsynced before build ends).
+		 */
+#if PG_VERSION_NUM >= 150000
+		flushlsn = GetFlushRecPtr(NULL);
+#else
+		flushlsn = GetFlushRecPtr();
+#endif
+		if (lsn > flushlsn)
+		{
+			elog(DEBUG5, "last-written LSN %X/%X is ahead of last flushed LSN %X/%X",
+				 (uint32) (lsn >> 32), (uint32) lsn,
+				 (uint32) (flushlsn >> 32), (uint32) flushlsn);
+			XLogFlush(lsn);
+		}
+	}
+	
+	if (effective != NULL)
+		*effective = local_effective;
+
+	return lsn;
+}
+
+static XLogRecPtr
+neon_get_relfilenode_request_lsn(bool *latest, RelFileNode rnode, ForkNumber forknum)
+{
+	XLogRecPtr	lsn;
+
+	if (RecoveryInProgress())
+	{
+		*latest = false;
+		lsn = GetXLogReplayRecPtr(NULL);
+		elog(DEBUG1, "neon_get_page_request_lsn GetXLogReplayRecPtr %X/%X request lsn 0 ",
+			 (uint32) ((lsn) >> 32), (uint32) (lsn));
+	}
+	else if (am_walsender)
+	{
+		*latest = true;
+		lsn = InvalidXLogRecPtr;
+		elog(DEBUG1, "am walsender neon_get_page_request_lsn lsn 0 ");
+	}
+	else
+	{
+		XLogRecPtr	flushlsn;
+
+		/*
+		 * Use the latest LSN that was evicted from the buffer cache. Any
+		 * pages modified by later WAL records must still in the buffer cache,
+		 * so our request cannot concern those.
+		 */
+		*latest = true;
+		lsn = GetLastWrittenLsnForRelFileNode(rnode, forknum, NULL);
+		Assert(lsn != InvalidXLogRecPtr || lsn_cache_size <= 0);
+		elog(DEBUG1, "neon_get_page_request_lsn GetLastWrittenLSN lsn %X/%X ",
+			 (uint32) ((lsn) >> 32), (uint32) (lsn));
+
+		lsn = nm_adjust_lsn(lsn);
+
+		/*
+		 * Is it possible that the last-written LSN is ahead of last flush
+		 * LSN? Generally not, we shouldn't evict a page from the buffer cache
+		 * before all its modifications have been safely flushed. That's the
+		 * "WAL before data" rule. However, such case does exist at index
+		 * building, _bt_blwritepage logs the full page without flushing WAL
+		 * before smgrextend (files are fsynced before build ends).
+		 */
+#if PG_VERSION_NUM >= 150000
+		flushlsn = GetFlushRecPtr(NULL);
+#else
+		flushlsn = GetFlushRecPtr();
+#endif
+		if (lsn > flushlsn)
+		{
+			elog(DEBUG5, "last-written LSN %X/%X is ahead of last flushed LSN %X/%X",
+				 (uint32) (lsn >> 32), (uint32) lsn,
+				 (uint32) (flushlsn >> 32), (uint32) flushlsn);
+			XLogFlush(lsn);
+		}
+	}
+
+	return lsn;
+}
+
+static XLogRecPtr
+neon_get_database_request_lsn(bool *latest, Oid datoid)
+{
+	XLogRecPtr	lsn;
+
+	if (RecoveryInProgress())
+	{
+		*latest = false;
+		lsn = GetXLogReplayRecPtr(NULL);
+		elog(DEBUG1, "neon_get_page_request_lsn GetXLogReplayRecPtr %X/%X request lsn 0 ",
+			 (uint32) ((lsn) >> 32), (uint32) (lsn));
+	}
+	else if (am_walsender)
+	{
+		*latest = true;
+		lsn = InvalidXLogRecPtr;
+		elog(DEBUG1, "am walsender neon_get_page_request_lsn lsn 0 ");
+	}
+	else
+	{
+		XLogRecPtr	flushlsn;
+
+		/*
+		 * Use the latest LSN that was evicted from the buffer cache. Any
+		 * pages modified by later WAL records must still in the buffer cache,
+		 * so our request cannot concern those.
+		 */
+		*latest = true;
+		lsn = GetLastWrittenLsnForDatabase(datoid, NULL);
+		Assert(lsn != InvalidXLogRecPtr || lsn_cache_size <= 0);
+		elog(DEBUG1, "neon_get_page_request_lsn GetLastWrittenLSN lsn %X/%X ",
 			 (uint32) ((lsn) >> 32), (uint32) (lsn));
 
 		lsn = nm_adjust_lsn(lsn);
@@ -1490,7 +1622,7 @@ neon_exists(SMgrRelation reln, ForkNumber forkNum)
 		return false;
 	}
 
-	request_lsn = neon_get_request_lsn(&latest, reln->smgr_rnode.node, forkNum, REL_METADATA_PSEUDO_BLOCKNO);
+	request_lsn = neon_get_relfilenode_request_lsn(&latest, reln->smgr_rnode.node, forkNum);
 	{
 		NeonExistsRequest request = {
 			.req.tag = T_NeonExistsRequest,
@@ -1654,7 +1786,7 @@ neon_extend(SMgrRelation reln, ForkNumber forkNum, BlockNumber blkno,
 		reln->smgr_relpersistence == RELPERSISTENCE_PERMANENT &&
 		!IsAutoVacuumWorkerProcess())
 	{
-		uint64		current_size = GetZenithCurrentClusterSize();
+		uint64		current_size = GetNeonCurrentClusterSize();
 
 		if (current_size >= ((uint64) max_cluster_size) * 1024 * 1024)
 			ereport(ERROR,
@@ -1670,8 +1802,18 @@ neon_extend(SMgrRelation reln, ForkNumber forkNum, BlockNumber blkno,
 	 * call smgrextend for destination relation n using size of source relation
 	 */
 	n_blocks = neon_nblocks(reln, forkNum);
+
 	while (n_blocks < blkno)
-		neon_wallog_page(reln, forkNum, n_blocks++, buffer, true);
+	{
+		/*
+		 * Utilize a static, zeroed, block, and assume a normal block, i.e.,
+		 * no logging of the hole in the page.
+		 */
+		lsn = log_newpage(&reln->smgr_rnode.node, forkNum, n_blocks,
+					(char *) &zeroblock.data, true);
+		neon_set_lwlf_block_hook(lsn, reln->smgr_rnode.node, forkNum, n_blocks);
+		n_blocks++;
+	}
 
 	neon_wallog_page(reln, forkNum, blkno, buffer, false);
 	set_cached_relsize(reln->smgr_rnode.node, forkNum, blkno + 1);
@@ -1698,10 +1840,10 @@ neon_extend(SMgrRelation reln, ForkNumber forkNum, BlockNumber blkno,
 	 */
 	if (lsn == InvalidXLogRecPtr)
 	{
-		lsn = GetXLogInsertRecPtr();
-		SetLastWrittenLSNForBlock(lsn, reln->smgr_rnode.node, forkNum, blkno);
+		lsn = ProcLastRecPtr;
+		neon_set_lwlf_block_hook(lsn, reln->smgr_rnode.node, forkNum, blkno);
 	}
-	SetLastWrittenLSNForRelation(lsn, reln->smgr_rnode.node, forkNum);
+	neon_set_lwlf_relation_hook(lsn, reln->smgr_rnode.node, forkNum);
 }
 
 /*
@@ -1962,7 +2104,7 @@ neon_read(SMgrRelation reln, ForkNumber forkNum, BlockNumber blkno,
 		return;
 	}
 
-	request_lsn = neon_get_request_lsn(&latest, reln->smgr_rnode.node, forkNum, blkno);
+	request_lsn = neon_get_page_request_lsn(&latest, reln->smgr_rnode.node, forkNum, blkno, NULL);
 	neon_read_at_lsn(reln->smgr_rnode.node, forkNum, blkno, request_lsn, latest, buffer);
 
 #ifdef DEBUG_COMPARE_LOCAL
@@ -2141,6 +2283,7 @@ neon_nblocks(SMgrRelation reln, ForkNumber forknum)
 	BlockNumber n_blocks;
 	bool		latest;
 	XLogRecPtr	request_lsn;
+	NeonNblocksRequest request;
 
 	switch (reln->smgr_relpersistence)
 	{
@@ -2169,9 +2312,9 @@ neon_nblocks(SMgrRelation reln, ForkNumber forknum)
 		return n_blocks;
 	}
 
-	request_lsn = neon_get_request_lsn(&latest, reln->smgr_rnode.node, forknum, REL_METADATA_PSEUDO_BLOCKNO);
+	request_lsn = neon_get_relfilenode_request_lsn(&latest, reln->smgr_rnode.node, forknum);
 	{
-		NeonNblocksRequest request = {
+		request = (NeonNblocksRequest) {
 			.req.tag = T_NeonNblocksRequest,
 			.req.latest = latest,
 			.req.lsn = request_lsn,
@@ -2189,6 +2332,8 @@ neon_nblocks(SMgrRelation reln, ForkNumber forknum)
 			break;
 
 		case T_NeonErrorResponse:
+			Assert(false);
+
 			ereport(ERROR,
 					(errcode(ERRCODE_IO_ERROR),
 					 errmsg("could not read relation size of rel %u/%u/%u.%u from page server at lsn %X/%08X",
@@ -2204,6 +2349,7 @@ neon_nblocks(SMgrRelation reln, ForkNumber forknum)
 		default:
 			elog(ERROR, "unexpected response from page server with tag 0x%02x", resp->tag);
 	}
+
 	update_cached_relsize(reln->smgr_rnode.node, forknum, n_blocks);
 
 	elog(SmgrTrace, "neon_nblocks: rel %u/%u/%u fork %u (request LSN %X/%08X): %u blocks",
@@ -2228,9 +2374,8 @@ neon_dbsize(Oid dbNode)
 	int64		db_size;
 	XLogRecPtr	request_lsn;
 	bool		latest;
-	RelFileNode dummy_node = {InvalidOid, InvalidOid, InvalidOid};
 
-	request_lsn = neon_get_request_lsn(&latest, dummy_node, MAIN_FORKNUM, REL_METADATA_PSEUDO_BLOCKNO);
+	request_lsn = neon_get_database_request_lsn(&latest, dbNode);
 	{
 		NeonDbSizeRequest request = {
 			.req.tag = T_NeonDbSizeRequest,
@@ -2325,7 +2470,7 @@ neon_truncate(SMgrRelation reln, ForkNumber forknum, BlockNumber nblocks)
 	 * for the extended pages, so there's no harm in leaving behind obsolete
 	 * entries for the truncated chunks.
 	 */
-	SetLastWrittenLSNForRelation(lsn, reln->smgr_rnode.node, forknum);
+	neon_set_lwlf_relation_hook(lsn, reln->smgr_rnode.node, forknum);
 
 #ifdef DEBUG_COMPARE_LOCAL
 	if (IS_LOCAL_REL(reln))
@@ -2347,6 +2492,8 @@ neon_truncate(SMgrRelation reln, ForkNumber forknum, BlockNumber nblocks)
 void
 neon_immedsync(SMgrRelation reln, ForkNumber forknum)
 {
+	BlockNumber nblocks;
+
 	switch (reln->smgr_relpersistence)
 	{
 		case 0:
@@ -2364,6 +2511,17 @@ neon_immedsync(SMgrRelation reln, ForkNumber forknum)
 		default:
 			elog(ERROR, "unknown relpersistence '%c'", reln->smgr_relpersistence);
 	}
+
+	nblocks = neon_nblocks(reln, forknum);
+
+	for (BlockNumber blkno = 0; blkno < nblocks; blkno++)
+	{
+		/* make sure we don't fail to register logged changes that were not */
+		neon_set_lwlf_block_hook(ProcLastRecPtr, reln->smgr_rnode.node,
+								 forknum, blkno);
+	}
+	neon_set_lwlf_relation_hook(ProcLastRecPtr, reln->smgr_rnode.node,
+								forknum);
 
 	elog(SmgrTrace, "[NEON_SMGR] immedsync noop");
 
