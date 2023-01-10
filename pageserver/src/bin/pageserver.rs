@@ -201,7 +201,7 @@ fn initialize_config(
 
 fn start_pageserver(conf: &'static PageServerConf) -> anyhow::Result<()> {
     // Initialize logging
-    let _reload_handle = logging::init(conf.log_format)?;
+    let _reload_handle = logging::init(conf.log_format);
 
     // Print version to the log, and expose it as a prometheus metric too.
     info!("version: {}", version());

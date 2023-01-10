@@ -44,7 +44,7 @@ pub enum LogReloadHandle {
     Json(reload::Handle<EnvFilter, JsonSubscriber>),
 }
 
-pub fn init(log_format: LogFormat) -> anyhow::Result<LogReloadHandle> {
+pub fn init(log_format: LogFormat) -> LogReloadHandle {
     let default_filter_str = "info";
 
     // We fall back to printing all spans at info-level or above if
@@ -55,10 +55,10 @@ pub fn init(log_format: LogFormat) -> anyhow::Result<LogReloadHandle> {
     let base_logger = tracing_subscriber::fmt()
         .with_env_filter(env_filter)
         .with_target(false)
-        .with_ansi(false)
+        .with_ansi(atty::is(atty::Stream::Stdout))
         .with_writer(std::io::stdout as StdoutWriter);
 
-    let handle = match log_format {
+    match log_format {
         LogFormat::Json => {
             let json = base_logger.json().with_filter_reloading();
             let handle = json.reload_handle();
@@ -71,7 +71,5 @@ pub fn init(log_format: LogFormat) -> anyhow::Result<LogReloadHandle> {
             plain.init();
             LogReloadHandle::Plain(handle)
         }
-    };
-
-    Ok(handle)
+    }
 }
