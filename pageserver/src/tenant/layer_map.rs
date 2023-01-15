@@ -576,8 +576,9 @@ where
             {
                 continue;
             }
-
-            result += 1;
+            if l.overlaps(key_range)? {
+                result += 1;
+            }
         }
         Ok(result)
     }

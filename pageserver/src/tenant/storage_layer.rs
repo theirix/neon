@@ -124,6 +124,11 @@ pub trait Layer: Send + Sync {
 
     /// Dump summary of the contents of the layer to stdout
     fn dump(&self, verbose: bool) -> Result<()>;
+
+    /// Checks if layer contains any entries belonging to the specified key range
+    fn overlaps(&self, key_range: &Range<Key>) -> Result<bool> {
+        Ok(range_overlaps(&self.get_key_range(), key_range))
+    }
 }
 
 /// Returned by [`Layer::iter`]
