@@ -152,8 +152,13 @@ pub fn handle_roles(spec: &ComputeSpec, client: &mut Client) -> Result<()> {
             {
                 RoleAction::Update
             } else if let Some(pg_pwd) = &r.encrypted_password {
-                // Check whether password changed or not (trim 'md5:' prefix first)
-                if pg_pwd[3..] != *role.encrypted_password.as_ref().unwrap() {
+                // Check whether password changed or not (trim 'md5' prefix first if any)
+                let pg_pwd = if let Some(stripped) = pg_pwd.strip_prefix("md5") {
+                    stripped
+                } else {
+                    pg_pwd
+                };
+                if pg_pwd != *role.encrypted_password.as_ref().unwrap() {
                     RoleAction::Update
                 } else {
                     RoleAction::None
