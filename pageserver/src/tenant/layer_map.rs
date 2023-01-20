@@ -309,6 +309,11 @@ where
                 continue;
             }
             assert!(l.get_key_range().contains(&key));
+            if let Ok(contains) = l.overlaps(&(key..key.next())) {
+                if !contains {
+                    continue;
+                }
+            }
             if l.get_lsn_range().start >= end_lsn {
                 info!(
                     "Candidate delta layer {}..{} is too new for lsn {}",
