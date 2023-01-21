@@ -63,7 +63,12 @@ async fn main() -> anyhow::Result<()> {
     };
 
     let proxy_address: SocketAddr = arg_matches.get_one::<String>("proxy").unwrap().parse()?;
-    let mgmt_address: SocketAddr = arg_matches.get_one::<String>("mgmt").unwrap().parse()?;
+    let mgmt_address_str = arg_matches.get_one::<String>("mgmt").unwrap();
+    let mgmt_address: Option<SocketAddr> = if !mgmt_address_str.is_empty() {
+        Some(mgmt_address_str.parse()?)
+    } else {
+        None
+    };
     let http_address: SocketAddr = arg_matches.get_one::<String>("http").unwrap().parse()?;
 
     let metric_collection_config = match
@@ -122,8 +127,12 @@ async fn main() -> anyhow::Result<()> {
     info!("Starting http on {http_address}");
     let http_listener = TcpListener::bind(http_address).await?.into_std()?;
 
-    info!("Starting mgmt on {mgmt_address}");
-    let mgmt_listener = TcpListener::bind(mgmt_address).await?.into_std()?;
+    let mgmt_listener = if let Some(mgmt_address) = mgmt_address {
+        info!("Starting mgmt on {mgmt_address}");
+        Some(TcpListener::bind(mgmt_address).await?.into_std()?)
+    } else {
+        None
+    };
 
     info!("Starting proxy on {proxy_address}");
     let proxy_listener = TcpListener::bind(proxy_address).await?;
@@ -131,8 +140,13 @@ async fn main() -> anyhow::Result<()> {
     let mut tasks = vec![
         tokio::spawn(http::server::task_main(http_listener)),
         tokio::spawn(proxy::task_main(config, proxy_listener)),
-        tokio::task::spawn_blocking(move || mgmt::thread_main(mgmt_listener)),
     ];
+
+    if let Some(mgmt_listener) = mgmt_listener {
+        tasks.push(tokio::task::spawn_blocking(move || {
+            mgmt::thread_main(mgmt_listener)
+        }));
+    }
 
     if let Some(wss_address) = arg_matches.get_one::<String>("wss") {
         let wss_address: SocketAddr = wss_address.parse()?;
@@ -190,13 +204,13 @@ fn cli() -> clap::Command {
             Arg::new("mgmt")
                 .short('m')
                 .long("mgmt")
-                .help("listen for management callback connection on ip:port")
-                .default_value("127.0.0.1:7000"),
+                .help("listen for management callback connection on ip:port (disabled by default)")
+                .default_value(""),
         )
         .arg(
             Arg::new("http")
                 .long("http")
-                .help("listen for incoming http connections (metrics, etc) on ip:port")
+                .help("listen for incoming http connections (control plane callbacks, metrics, etc) on ip:port")
                 .default_value("127.0.0.1:7001"),
         )
         .arg(
